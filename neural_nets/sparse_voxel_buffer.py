@@ -126,3 +126,14 @@ class SparseVoxelBuffer(SingletonBuffer[torch.Tensor]):
         return self._buffer[item_ids]
 
     # FIXME: no cleanup?
+
+    def cleanup(self, active_ids: torch.IntTensor) -> None:
+        """Remove items that are no longer in use."""
+        assert (self.known_used_positions[active_ids]).any(), (
+            "Some of queried positions were empty"
+        )
+        self.known_used_positions[active_ids] = False
+
+        # cleanup assuming the tensor is dense:
+        # todo: all edge idx that are of not from active_ids should be removed.
+        self._buffer[active_ids] = torch.zeros_like(self._buffer[active_ids])

@@ -330,12 +330,14 @@ class SACTrainer:
             self.des_voxel_ids[first_step_idx] = self.voxel_buffer.add(
                 voxel_des_obs.index_select(0, first_step_idx)
             ).int()
+            batch_init_graph_obs = init_graph_obs.to_data_list()
+            batch_des_graph_obs = des_graph_obs.to_data_list()
             self.init_graph_ids[first_step_idx] = self.graph_buffer.add(
-                Batch(init_graph_obs[first_step_idx])
-            )
+                Batch.from_data_list([batch_init_graph_obs[i] for i in first_step_idx])
+            ).int()
             self.des_graph_ids[first_step_idx] = self.graph_buffer.add(
-                Batch(des_graph_obs[first_step_idx])
-            )
+                Batch.from_data_list([batch_des_graph_obs[i] for i in first_step_idx])
+            ).int()
 
         # Add to replay buffer
         self.replay_buffer.extend(  # debug note: `extend`, not `add.`
