@@ -9,6 +9,7 @@ genesis-world
 libigl==2.5.1
 # flashbax # buffers
 torchrl
+## torchsparse
 
 
 #note: installing repairs-components like this: /home/mriabov/anaconda3/envs/repairs/bin/python -m pip install --force-reinstall --no-cache-dir -e .

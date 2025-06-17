@@ -1,20 +1,20 @@
 import copy
-from typing import Dict, Tuple, Optional
+from typing import Dict, Tuple
 
+from examples.box_to_pos_task import MoveBoxSetup
+from genesis import gs
+from torchsparse_util import batch_sparse_coo_to_torchsparse
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torchrl.data.replay_buffers import TensorDictReplayBuffer, TensorStorage
+from torch_geometric.data import Batch
+from graphs import GraphEncoder
 import torchsparse.nn as tsnn
-from torch_geometric.data import Batch, Data
-from torchrl.data import TensorDictReplayBuffer, LazyTensorStorage, TensorDict
-from torchrl.data.replay_buffers.samplers import RandomSampler
-from torchrl.data.tensor_specs import TensorSpec
 
-from neural_nets.utils import hard_update, soft_update
-from neural_nets.singleton_graph_buffer import GraphBuffer
-from neural_nets.sparse_voxel_buffer import SparseVoxelBuffer
-from neural_nets.graphs import GraphEncoder
+from sparse_voxel_buffer import SparseVoxelBuffer
 import tensordict
+from singleton_graph_buffer import GraphBuffer
 
 
 class SACActor(nn.Module):
@@ -192,7 +192,8 @@ class SACTrainer:
         alpha_lr=3e-4,
         buffer_size=100000,
         batch_size=256,
-        cleanup_freq: int = 10,  # How often to clean up unused voxels
+        singleton_buffer_size=20000,
+        cleanup_freq: int = 10,  # How often to clean up unused voxels and electronics graphs
     ):
         self.device = device or torch.device(
             "cuda" if torch.cuda.is_available() else "cpu"
@@ -209,12 +210,6 @@ class SACTrainer:
         self.cleanup_freq = cleanup_freq
         self.steps_since_cleanup = 0
 
-        # Sparse voxel storage
-        self.voxel_buffer = SparseVoxelBuffer(device=self.device)
-
-        # Initialize graph buffer for electronics observations
-        self.graph_buffer = GraphBuffer(device=str(self.device))  # Convert to string for device specification
-
         # Optimizers
         self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=actor_lr)
         self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=critic_lr)
@@ -224,16 +219,14 @@ class SACTrainer:
         tensor_dict = tensordict.TensorDict(
             {
                 "init_voxel_id": torch.zeros(
-                    (buffer_size,), dtype=torch.long
+                    (buffer_size,), dtype=torch.int
                 ),  # Stores voxel IDs instead of full tensors
-                "des_voxel_id": torch.zeros(
-                    (buffer_size,), dtype=torch.long
+                "des_voxel_id": torch.zeros((buffer_size,), dtype=torch.int),
+                "init_electronics_graph_id": torch.zeros(
+                    (buffer_size,), dtype=torch.int
                 ),
-                "init_graph_id": torch.zeros(
-                    (buffer_size,), dtype=torch.long
-                ),  # Store graph IDs instead of full tensors
-                "des_graph_id": torch.zeros(
-                    (buffer_size,), dtype=torch.long
+                "des_electronics_graph_id": torch.zeros(
+                    (buffer_size,), dtype=torch.int
                 ),
                 "video_obs": torch.zeros(
                     (buffer_size, 2, 7, 256, 256), dtype=torch.uint8
@@ -242,7 +235,7 @@ class SACTrainer:
                 "action": torch.zeros((buffer_size, action_dim), dtype=torch.float32),
                 "done": torch.zeros((buffer_size,), dtype=torch.bool),
             },
-            batch_size=[buffer_size],
+            batch_size=(buffer_size,),
             device=self.device,
         )
 
@@ -252,9 +245,26 @@ class SACTrainer:
         self.replay_buffer = TensorDictReplayBuffer(
             storage=self.buffer_storage, batch_size=batch_size
         )
-        self.voxel_ids = torch.zeros(batch_size, dtype=torch.long, device=self.device)
+        # Singleton storages
+        # Sparse voxel & graph storage
+        self.voxel_buffer = SparseVoxelBuffer(
+            buffer_size=singleton_buffer_size,
+            batch_size=batch_size,
+            voxel_shape=(256, 256, 256),
+            device=self.device,
+        )
+        self.graph_buffer = GraphBuffer(device=self.device)
+        # voxels ids
+        self.voxel_ids = torch.zeros(batch_size, dtype=torch.int, device=self.device)
         self.des_voxel_ids = torch.zeros(
-            batch_size, dtype=torch.long, device=self.device
+            batch_size, dtype=torch.int, device=self.device
+        )
+        # electronics graphs ids
+        self.init_graph_ids = torch.zeros(
+            batch_size, dtype=torch.int, device=self.device
+        )
+        self.des_graph_ids = torch.zeros(
+            batch_size, dtype=torch.int, device=self.device
         )
 
     def select_action(self, voxel_obs, video_obs, graph_obs, deterministic=False):
@@ -268,23 +278,19 @@ class SACTrainer:
         self.actor.train()
         return action.cpu()
 
-    def update(self, batch):
-        v, vid, g, a, r, nv, nvid, ng, d = batch
-        v, vid, g, a, r, nv, nvid, ng, d = [
-            x.to(self.device) for x in (v, vid, g, a, r, nv, nvid, ng, d)
-        ]
+    def update(self, v_init, v_des, vid_obs, g_init, g_des, a, r, next_vid, d):
         with torch.no_grad():
-            na, nlp = self.actor.sample_action(nv, nvid, ng)
-            q1n, q2n = self.critic_target(nv, nvid, ng, na)
+            na, nlp = self.actor.sample_action(v_des, next_vid, g_des)
+            q1n, q2n = self.critic_target(v_des, next_vid, g_des, na)
             qn = torch.min(q1n, q2n) - self.log_alpha.exp() * nlp
             target = r.unsqueeze(-1) + self.gamma * (1 - d.unsqueeze(-1)) * qn
-        q1, q2 = self.critic(v, vid, g, a)
+        q1, q2 = self.critic(v_init, vid_obs, g_init, a)
         cl = F.mse_loss(q1, target) + F.mse_loss(q2, target)
         self.critic_optimizer.zero_grad()
         cl.backward()
         self.critic_optimizer.step()
-        a2, lp = self.actor.sample_action(v, vid, g)
-        q1n, q2n = self.critic(v, vid, g, a2)
+        a2, lp = self.actor.sample_action(v_init, vid_obs, g_init)
+        q1n, q2n = self.critic(v_init, vid_obs, g_init, a2)
         al = (self.log_alpha.exp() * lp - torch.min(q1n, q2n)).mean()
         self.actor_optimizer.zero_grad()
         al.backward()
@@ -301,10 +307,11 @@ class SACTrainer:
 
     def _add_to_buffer(
         self,
-        is_first_step: torch.BoolTensor,
         video_obs: torch.Tensor,
         action: torch.Tensor,
-        reward: float,
+        rewards: torch.Tensor,
+        # next_voxel_obs: torch.Tensor,
+        # next_video_obs: torch.Tensor,
         init_graph_obs: Batch,
         des_graph_obs: Batch,
         done: torch.Tensor,
@@ -313,62 +320,48 @@ class SACTrainer:
     ) -> None:
         """Helper method to add transitions to the replay buffer with sparse voxel storage."""
         # Store voxel observations in the sparse buffer and get their IDs
-        for env_id in torch.nonzero(is_first_step).squeeze():
-            self.voxel_ids[env_id] = self.voxel_buffer.add(voxel_init_obs[env_id])
-            self.des_voxel_ids[env_id] = self.voxel_buffer.add(voxel_des_obs[env_id])
-
-        # Add graphs to the graph buffer and get their IDs
-        # Convert PyG Batch/Data to dict if needed
-        def get_graph_components(graph):
-            if isinstance(graph, (Batch, Data)):
-                return {
-                    'edge_index': graph.edge_index,
-                    'node_features': getattr(graph, 'x', None),
-                    'edge_features': getattr(graph, 'edge_attr', None)
-                }
-            return graph
-            
-        init_graph = get_graph_components(init_graph_obs)
-        des_graph = get_graph_components(des_graph_obs)
-        
-        init_graph_id = self.graph_buffer.add(
-            edge_index=init_graph['edge_index'],
-            node_features=init_graph.get('node_features'),
-            edge_features=init_graph.get('edge_features')
-        )
-        des_graph_id = self.graph_buffer.add(
-            edge_index=des_graph['edge_index'],
-            node_features=des_graph.get('node_features'),
-            edge_features=des_graph.get('edge_features')
-        )
+        first_step_idx = done.to(self.device).nonzero().squeeze(1)
+        voxel_init_obs = voxel_init_obs.to(self.device)
+        voxel_des_obs = voxel_des_obs.to(self.device)
+        if done.any():
+            self.voxel_ids[first_step_idx] = self.voxel_buffer.add(
+                voxel_init_obs.index_select(0, first_step_idx)
+            ).int()  # note ^: index_select because getitem is not implemented on sparse arrays
+            self.des_voxel_ids[first_step_idx] = self.voxel_buffer.add(
+                voxel_des_obs.index_select(0, first_step_idx)
+            ).int()
+            self.init_graph_ids[first_step_idx] = self.graph_buffer.add(
+                Batch(init_graph_obs[first_step_idx])
+            )
+            self.des_graph_ids[first_step_idx] = self.graph_buffer.add(
+                Batch(des_graph_obs[first_step_idx])
+            )
 
         # Add to replay buffer
-        batch_data = {
-            "init_voxel_id": self.voxel_ids.unsqueeze(0).to(self.device),
-            "des_voxel_id": self.des_voxel_ids.unsqueeze(0).to(self.device),
-            "init_graph_id": torch.tensor([[init_graph_id]], device=self.device),
-            "des_graph_id": torch.tensor([[des_graph_id]], device=self.device),
-            "video_obs": video_obs.unsqueeze(0).to(self.device) if video_obs is not None else None,
-            "action": action.unsqueeze(0).to(self.device) if action is not None else None,
-            "reward": torch.tensor([reward], device=self.device) if reward is not None else None,
-            "done": done.unsqueeze(0).to(self.device) if done is not None else None,
-        }
-        batch_data = {k: v for k, v in batch_data.items() if v is not None}
-        
-        batch = TensorDict(
-            batch_data,
-            batch_size=[1],  # Single transition
-            device=self.device,
+        self.replay_buffer.extend(  # debug note: `extend`, not `add.`
+            tensordict.TensorDict(
+                {
+                    "init_voxel_id": self.voxel_ids,
+                    "des_voxel_id": self.des_voxel_ids,
+                    "video_obs": video_obs.permute(0, 1, 4, 2, 3),
+                    "init_electronics_graph_id": self.init_graph_ids,
+                    "des_electronics_graph_id": self.des_graph_ids,
+                    "action": action,
+                    "reward": rewards,
+                    "done": done,
+                },
+                batch_size=(done.size()[0],),
+                device=self.device,
+            )
         )
-        self.replay_buffer.add(batch)
 
         # Periodically clean up unused voxels
         self.steps_since_cleanup += 1
         if self.steps_since_cleanup >= self.cleanup_freq:
-            self._cleanup_voxel_buffer()
+            self._cleanup_singleton_buffers()
             self.steps_since_cleanup = 0
 
-    def _cleanup_voxel_buffer(self) -> None:
+    def _cleanup_singleton_buffers(self) -> None:
         """Clean up unused voxels from the buffer."""
         # Get all active voxel IDs from the replay buffer
         all_voxel_ids = torch.cat([self.voxel_ids, self.des_voxel_ids]).unique()
@@ -377,29 +370,32 @@ class SACTrainer:
         # Clean up unused voxels
         self.voxel_buffer.cleanup(all_voxel_ids)
 
+        # Clean up unused electronics graphs
+        all_graph_ids = torch.cat([self.init_graph_ids, self.des_graph_ids]).unique()
+        self.graph_buffer.cleanup(all_graph_ids)
+
     def get_batch_voxels(
-        self, batch: Dict[str, torch.Tensor]
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        self, init_voxel_ids: torch.Tensor, des_voxel_ids: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Retrieve voxel tensors from the sparse buffer for a batch."""
-        # Get unique voxel IDs in this batch
-        voxel_ids = torch.cat([batch["init_voxel_id"], batch["des_voxel_id"]]).unique()
+        # Get unique voxel IDs in this batch and get from buffer
+        init_voxels = self.voxel_buffer.get(init_voxel_ids.unique())
+        des_voxels = self.voxel_buffer.get(des_voxel_ids.unique())
+        # Convert to torchsparse
+        init_voxels = batch_sparse_coo_to_torchsparse(init_voxels)
+        des_voxels = batch_sparse_coo_to_torchsparse(des_voxels)
+        return init_voxels, des_voxels
 
-        # Create a mapping from ID to index for fast lookup
-        id_to_idx = {vid.item(): i for i, vid in enumerate(voxel_ids)}
+    def get_batch_electronics_graphs(
+        self, init_graph_ids: torch.Tensor, des_graph_ids: torch.Tensor
+    ) -> tuple[Batch, Batch]:
+        """Retrieve electronics graph tensors from the singleton buffer for a batch."""
+        # Get unique graph IDs in this batch
+        init_graph_ids = torch.cat([init_graph_ids, des_graph_ids]).unique()
 
-        # Get all unique voxels
-        voxels = torch.stack([self.voxel_buffer.get(vid.item()) for vid in voxel_ids])
-
-        # Create index tensors for batch lookups
-        batch_voxel_indices = torch.tensor(
-            [id_to_idx[vid.item()] for vid in batch["init_voxel_id"]], device=self.device
+        return self.graph_buffer.get(init_graph_ids), self.graph_buffer.get(
+            des_graph_ids
         )
-        des_batch_voxel_indices = torch.tensor(
-            [id_to_idx[vid.item()] for vid in batch["des_voxel_id"]],
-            device=self.device,
-        )
-
-        return voxels, batch_voxel_indices, des_batch_voxel_indices
 
 
 # ===== Training Orchestrator =====
@@ -415,6 +411,8 @@ def run_training(
     electronics_graph_dim,
     num_steps=10000,
     prefill_steps=1000,
+    buffer_size=10000,
+    singleton_buffer_size=1000,
 ):
     """
     Orchestrates environment interaction, replay buffer filling, and training steps.
@@ -434,40 +432,54 @@ def run_training(
         action_dim,
         electronics_graph_dim,
         buffer_size=buffer_size,
+        singleton_buffer_size=singleton_buffer_size,
         batch_size=ml_batch_dim,
     )
 
-    voxel_init_obs, voxel_des_obs, video_obs, graph_curr_obs, graph_des_obs = (
+    voxel_init_obs, voxel_des_obs, video_obs, graph_init_obs, graph_des_obs = (
         env.reset()
     )
 
     prev_video_obs = video_obs
+    # fill singleton buffers with one transition to avoid empty buffer error
+    done = torch.ones(
+        (ml_batch_dim,), dtype=torch.bool
+    )  # all true to write into buffers.
+    trainer._add_to_buffer(
+        video_obs,
+        torch.zeros((ml_batch_dim, action_dim), dtype=torch.float32),
+        torch.zeros((ml_batch_dim,), dtype=torch.float32),
+        graph_init_obs,
+        graph_des_obs,
+        done,
+        voxel_init_obs,
+        voxel_des_obs,
+    )
 
     # Prefill replay buffer with random actions
     for _ in range(prefill_steps):
         rand_action = torch.randn((ml_batch_dim, action_dim), device=trainer.device)
         # note: action should probably be rescaled to franka arm space.
         (
-            voxel_init,
-            voxel_des,
+            voxel_init_obs,
+            voxel_des_obs,
             video_obs,
-            graph_obs,
-            graph_des,
+            graph_init_obs,
+            graph_des_obs,
             rewards,
             dones,
             info,
         ) = env.step(rand_action)
 
         trainer._add_to_buffer(
-            is_first_step=dones,  # note: here done is true if the episode is over and reset.
-            # however I'm not sure if it was correct to reset environments without observing them.
+            # note: I'm not sure if it was correct to reset environments without observing them.
             voxel_init_obs=voxel_init_obs,
             voxel_des_obs=voxel_des_obs,
             video_obs=prev_video_obs,
-            init_graph_obs=graph_curr_obs,
+            init_graph_obs=graph_init_obs,
             des_graph_obs=graph_des_obs,
             action=rand_action,
-            reward=rewards,
+            rewards=rewards,
             # next_voxel_init_obs=voxel_init,
             # next_voxel_des_obs=voxel_des,
             # next_video_obs=video_obs,
@@ -481,16 +493,16 @@ def run_training(
     for step in range(num_steps):
         # Get action from policy
         action = trainer.select_action(
-            voxel_init_obs, voxel_des_obs, video_obs, graph_curr_obs
+            voxel_init_obs, voxel_des_obs, video_obs, graph_init_obs
         )
 
         # Step environment
         (
-            voxel_init,
-            voxel_des,
+            voxel_init_obs,
+            voxel_des_obs,
             video_obs,
-            graph_obs,
-            graph_des,
+            graph_init_obs,
+            graph_des_obs,
             rewards,
             dones,
             info,
@@ -501,15 +513,10 @@ def run_training(
             voxel_init_obs=voxel_init_obs,
             voxel_des_obs=voxel_des_obs,
             video_obs=prev_video_obs,
-            init_graph_obs=graph_curr_obs,
+            init_graph_obs=graph_init_obs,
             des_graph_obs=graph_des_obs,
             action=action.to(trainer.device),
-            reward=rewards,
-            next_voxel_init_obs=voxel_init,
-            next_voxel_des_obs=voxel_des,
-            next_video_obs=video_obs,
-            next_graph_curr_obs=graph_obs,
-            next_graph_des_obs=graph_des,
+            rewards=rewards,
             done=dones,
         )
 
@@ -518,36 +525,26 @@ def run_training(
             batch = trainer.replay_buffer.sample()
 
             # Get voxel tensors for the batch
-            voxels, voxel_indices, next_voxel_indices = trainer.get_batch_voxels(batch)
+            init_voxels, des_voxels = trainer.get_batch_voxels(
+                batch["init_voxel_id"], batch["des_voxel_id"]
+            )
 
-            # Get graph data from buffer using stored IDs
-            init_graph_batch = trainer.graph_buffer.get_batch(batch["init_graph_id"].flatten())
-            des_graph_batch = trainer.graph_buffer.get_batch(batch["des_graph_id"].flatten())
-
-            # Combine graph features for current and next states
-            graph_obs = torch.cat([
-                init_graph_batch['node_features'],
-                des_graph_batch['node_features']
-            ], dim=1)
-
-            next_graph_batch = trainer.graph_buffer.get_batch(batch["des_graph_id"].flatten())
-            next_graph_obs = torch.cat([
-                next_graph_batch['node_features'],
-                des_graph_batch['node_features']  # Keep desired graph for next state
-            ], dim=1)
+            # Get electronics graph tensors for the batch
+            init_graphs, des_graphs = trainer.get_batch_electronics_graphs(
+                batch["init_electronics_graph_id"], batch["des_electronics_graph_id"]
+            )
 
             # Update networks
             cl, al, alpha = trainer.update(
-                voxels=voxels,
-                video_obs=batch["video_obs"],
-                graph_obs=graph_obs,
-                action=batch["action"],
-                reward=batch["reward"],
-                next_voxels=voxels[next_voxel_indices],
-                next_video_obs=batch["video_obs"],
-                next_graph_obs=next_graph_obs,
-                done=batch["done"],
-                voxel_indices=voxel_indices,
+                v_init=init_voxels,
+                v_des=des_voxels,
+                vid_obs=batch["video_obs"],
+                g_init=init_graphs,
+                g_des=des_graphs,
+                a=batch["action"],
+                r=batch["reward"],
+                next_vid=batch["next_video_obs"],
+                d=batch["done"],
             )
 
             if step % 1000 == 0:
@@ -656,6 +653,9 @@ if __name__ == "__main__":
     buffer_size = (
         500 if debug else 200_000
     )  # was 200_000, reduced due to GPU constraints.
+    singleton_buffer_size = (
+        200 if debug else 10_000
+    )  # was 200_000, reduced due to GPU constraints.
     min_buffer_len = 300 if debug else 10_000
     # ^46gb at 2*256*256*7*int8 res!!!
     sample_batch_size = 256
@@ -670,4 +670,6 @@ if __name__ == "__main__":
         ml_batch_dim=batch_size,
         action_dim=action_dim,
         electronics_graph_dim=electronics_graph_encoded_dim,
+        buffer_size=buffer_size,
+        singleton_buffer_size=singleton_buffer_size,
     )

@@ -24,7 +24,7 @@ Example:
 
 import torch
 from typing import Optional, Tuple
-from .singleton_buffer import SingletonBuffer
+from singleton_buffer import SingletonBuffer
 
 
 class SparseVoxelBuffer(SingletonBuffer[torch.Tensor]):
@@ -37,7 +37,8 @@ class SparseVoxelBuffer(SingletonBuffer[torch.Tensor]):
     def __init__(
         self,
         batch_size: int,
-        shape: tuple[int, ...],
+        buffer_size: int,
+        voxel_shape: tuple[int, ...],
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
     ):
         """Initialize the sparse voxel buffer.
@@ -46,14 +47,15 @@ class SparseVoxelBuffer(SingletonBuffer[torch.Tensor]):
             device: Device to store tensors on ('cuda' or 'cpu')
         """
         self._buffer = torch.sparse_coo_tensor(
-            indices=torch.zeros((0, 3), dtype=torch.int64),
-            values=torch.zeros((0, *shape), device=device),
-            size=(batch_size, *shape),
+            indices=torch.zeros((4, 0), dtype=torch.int16),
+            values=torch.zeros((0), dtype=torch.int8, device=device),
+            size=(buffer_size, *voxel_shape),
             device=device,
         )
+        self._buffer = self._buffer.coalesce()
         self.device = device
         self.known_used_positions = torch.zeros(
-            batch_size, dtype=torch.bool, device=device
+            buffer_size, dtype=torch.bool, device=device
         )
 
     def add(self, voxel_batch: torch.Tensor) -> torch.IntTensor:
@@ -65,18 +67,22 @@ class SparseVoxelBuffer(SingletonBuffer[torch.Tensor]):
         Returns:
             torch.IntTensor: The IDs corresponding to the voxels in the buffer
         """
+        voxel_batch = voxel_batch.coalesce()
+        assert not voxel_batch.indices().nonzero().shape[0] == 0, (
+            "Passed empty voxel batch to buffer add"
+        )
         # code tldr: add sparse tensors to another sparse tensor at available position.
         assert voxel_batch.ndim == 4, "voxel_batch must be a 4D tensor"
         assert voxel_batch.is_sparse, "voxel_batch must be a sparse tensor"
         available_positions = torch.nonzero(
             torch.logical_not(self.known_used_positions)
-        )
-        input_voxel_batch_positions = torch.unique(voxel_batch.indices()[:, 0])
+        ).squeeze(1)
+        input_voxel_batch_positions = torch.unique(voxel_batch.indices()[0])  # [:, 0]
         count_necessary_positions = len(input_voxel_batch_positions)
         assert available_positions.shape[0] >= count_necessary_positions, (
             f"Not enough available positions found: {available_positions.shape[0]} < {count_necessary_positions}"
         )
-        assert not self._buffer[available_positions].any(), (
+        assert not self._buffer.index_select(0, available_positions).any(), (
             "Some of the available positions have data in them."
         )
         set_at_positions = available_positions[:count_necessary_positions]
@@ -86,16 +92,37 @@ class SparseVoxelBuffer(SingletonBuffer[torch.Tensor]):
         for i in torch.arange(count_necessary_positions):
             input_pos = input_voxel_batch_positions[i]
             set_at_pos = set_at_positions[i]
+            # iteratively remap each unique batch index in `voxel_batch` so that it points
+            # to the corresponding free row selected in `set_at_positions`
             new_voxel_batch_indices = new_voxel_batch_indices.where(
-                new_voxel_batch_indices[:, 0] == input_pos, set_at_pos
+                new_voxel_batch_indices[0] == input_pos, set_at_pos
             )
 
         self._buffer = torch.sparse_coo_tensor(
-            torch.cat((new_voxel_batch_indices, voxel_batch.indices()), dim=0),
+            torch.cat((self._buffer.indices(), new_voxel_batch_indices), dim=1),
             torch.cat((self._buffer.values(), voxel_batch.values()), dim=0),
             size=(self._buffer.size(0), *voxel_batch.shape[1:]),
             device=self.device,
         )
-        self._buffer.coalesce()
+        self._buffer = self._buffer.coalesce()
         self.known_used_positions[set_at_positions] = True
         return set_at_positions
+
+    def get(self, item_ids: torch.IntTensor) -> torch.Tensor:
+        """Retrieve an item by its ID.
+
+        Args:
+            item_id: The ID of the item to retrieve
+
+        Returns:
+            The stored item
+
+        Raises:
+            ValueError: If the item ID is not found in the buffer
+        """
+        assert (self.known_used_positions[item_ids]).all(), (
+            "Some of queried positions were empty"
+        )
+        return self._buffer[item_ids]
+
+    # FIXME: no cleanup?

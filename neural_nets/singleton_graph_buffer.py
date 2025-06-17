@@ -2,6 +2,7 @@ import torch
 from typing import List, Optional, Sequence, cast
 from torch_geometric.data import Batch, Data
 
+
 class GraphBuffer:
     """Fixed-size buffer that stores small PyG graphs densely and references them by ID.
 
@@ -10,8 +11,8 @@ class GraphBuffer:
     • node-feature dimensionality is the same for every stored graph
 
     Internally we keep two dense tensors:
-        edge_index : (B, 2, max_edges)   – -1-padded
-        node_feat  : (B, max_nodes, F)   – 0-padded
+        edge_index : (B, 2, max_edges)    -1-padded
+        node_feat  : (B, max_nodes, F)    -0-padded
     plus ``num_nodes`` / ``num_edges`` vectors so we know the true sizes.
     ``used_mask`` functions like the one in SparseVoxelBuffer to locate free
     rows quickly.
@@ -25,7 +26,9 @@ class GraphBuffer:
         node_feat_dim: Optional[int] = None,
         device: str | torch.device = "cuda" if torch.cuda.is_available() else "cpu",
     ) -> None:
-        self.device = torch.device(device) if not isinstance(device, torch.device) else device
+        self.device = (
+            torch.device(device) if not isinstance(device, torch.device) else device
+        )
         self.buffer_size = buffer_size
         self.max_nodes = max_nodes
         self.max_edges = max_edges

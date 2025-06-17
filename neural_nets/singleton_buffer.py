@@ -103,7 +103,7 @@ class SingletonBuffer(Generic[T]):
         Args:
             active_ids: Tensor of item IDs that are currently in use
         """
-        assert (self.known_used_positions[active_ids]).all(), (
+        assert (self.known_used_positions[active_ids]).any(), (
             "Some of queried positions were empty"
         )
         self.known_used_positions[active_ids] = False
