@@ -76,15 +76,20 @@ class GAT(nn.Module):
         super(GAT, self).__init__()
         self.gat1 = GATLayer(num_features, hidden_dim, heads=heads)
         self.gat2 = GATLayer(hidden_dim, num_classes, heads=heads)
+        self.learnable_empty = nn.Parameter(torch.zeros(num_classes))
 
     def forward(self, data: Data):
         x, edge_index = data.x, data.edge_index
-
+        if (
+            x is None or x.shape[0] == 0
+        ):  # note: sometimes there will be no graph, e.g. no electronics present. then, return a learnable parameter.
+            return self.learnable_empty
         x = self.gat1(x, edge_index)
         x = F.relu(x)
         x = F.dropout(x, training=self.training)
         out = self.gat2(x, edge_index)
         return out
+
 
 class GraphEncoder(nn.Module):
     """Encode a graph with two-layer GAT and gated readout.
@@ -128,8 +133,21 @@ class GraphEncoder(nn.Module):
 
         # Weighted sum pooling followed by normalisation (weighted mean).
         num_graphs = batch.num_graphs
-        pooled = scatter_add(gated_emb, batch.batch, dim=0, dim_size=num_graphs)
-        norm = scatter_add(gates, batch.batch, dim=0, dim_size=num_graphs).clamp(min=1e-6)
+        if batch.batch.numel() == 0:
+            # for debug: if no nodes to pool, return zeros instead.
+            pooled = torch.zeros(
+                (num_graphs, gated_emb.size(-1)),
+                device=gated_emb.device,
+                dtype=gated_emb.dtype,
+            )
+            norm = torch.ones(
+                (num_graphs, 1), device=gated_emb.device, dtype=gated_emb.dtype
+            )  # Or 1s to avoid div by zero
+        else:
+            pooled = scatter_add(gated_emb, batch.batch, dim=0, dim_size=num_graphs)
+            norm = scatter_add(gates, batch.batch, dim=0, dim_size=num_graphs).clamp(
+                min=1e-6
+            )
         graph_emb = pooled / norm
 
         return graph_emb.squeeze(0)

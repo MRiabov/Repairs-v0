@@ -6,14 +6,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-class SparseSiLU(nn.Module):
-    """Apply SiLU activation to torchsparse `SparseTensor` features."""
-
-    def forward(self, x: torchsparse.SparseTensor):  
-        x.feats = F.silu(x.feats)
-        return x
-
-
 def batch_sparse_coo_to_torchsparse(sparse_coos: list[torch.Tensor]):
     assert all(sparse_coo.ndim == 4 for sparse_coo in sparse_coos), (
         f"All tensors must be 4D, but got {[sparse_coo.ndim for sparse_coo in sparse_coos]}"
