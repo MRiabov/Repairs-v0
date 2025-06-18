@@ -3,7 +3,7 @@ from typing import Dict, Tuple
 
 from examples.box_to_pos_task import MoveBoxSetup
 from genesis import gs
-from torchsparse_util import batch_sparse_coo_to_torchsparse
+from torchsparse_util import sparse_coo_to_torchsparse, SparseSiLU
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -45,14 +45,34 @@ class SACActor(nn.Module):
             216, 256, electronics_graph_encoded_dim, heads=2
         )
 
-    def forward(self, voxel_obs, video_obs, graph_obs: Batch):
+    def forward(
+        self,
+        voxel_init_obs,
+        voxel_des_obs,
+        video_obs,
+        graph_init_obs: Batch,
+        graph_des_obs: Batch,
+    ):
         # TODO add support for mech graphs.
 
-        # assume voxel_obs shape [B, 1, D, H, W]
-        x_v = F.silu(self.voxel_conv1(voxel_obs))
-        x_v = F.silu(self.voxel_conv2(x_v))
-        x_v = F.silu(self.voxel_conv3(x_v))
-        x_v = x_v.view(x_v.size(0), -1)
+        # assume voxel_init_obs shape [B, 1, D, H, W]
+        x_vox_i = self.voxel_conv1(voxel_init_obs)
+        x_vox_i.feats = F.silu(x_vox_i.feats)
+        x_vox_i = self.voxel_conv2(x_vox_i)
+        x_vox_i.feats = F.silu(x_vox_i.feats)
+        x_vox_i = self.voxel_conv3(x_vox_i)
+        x_vox_i.feats = F.silu(x_vox_i.feats)
+        x_v_dense = x_vox_i.dense()
+        x_vox_i = x_v_dense.view(x_v_dense.size(0), -1)
+        # desired voxels
+        x_vox_d = self.voxel_conv1(voxel_des_obs)
+        x_vox_d.feats = F.silu(x_vox_d.feats)
+        x_vox_d = self.voxel_conv2(x_vox_d)
+        x_vox_d.feats = F.silu(x_vox_d.feats)
+        x_vox_d = self.voxel_conv3(x_vox_d)
+        x_vox_d.feats = F.silu(x_vox_d.feats)
+        x_v_dense = x_vox_d.dense()
+        x_vox_d = x_v_dense.view(x_v_dense.size(0), -1)
 
         # assume video_obs shape [B, C, H, W]
         x_vid = F.silu(self.video_conv1(video_obs))
@@ -61,20 +81,33 @@ class SACActor(nn.Module):
         x_vid = x_vid.view(x_vid.size(0), -1)
 
         # observe graphs:
-        encoded_graph = self.graph_encoder(
-            graph_obs
+        encoded_graph_i = self.graph_encoder(
+            graph_init_obs
+        )  # not x_graph because graphs have their own x
+        encoded_graph_d = self.graph_encoder(
+            graph_des_obs
         )  # not x_graph because graphs have their own x
 
         # concatenate all features
-        x = torch.cat([x_v, x_vid, encoded_graph], dim=-1)
+        x = torch.cat([x_vox_i, x_vid, encoded_graph_i, encoded_graph_d], dim=-1)
         x = F.silu(self.fc1(x))
         x = F.silu(self.fc2(x))
         mean = self.out_mean(x)
         log_std = torch.clamp(self.out_log_std(x), -5.0, 2.0)
         return mean, log_std
 
-    def sample_action(self, voxel_obs, video_obs, graph_obs, deterministic=False):
-        mean, log_std = self.forward(voxel_obs, video_obs, graph_obs)
+    def sample_action(
+        self,
+        voxel_init_obs,
+        voxel_des_obs,
+        video_obs,
+        graph_init_obs,
+        graph_des_obs,
+        deterministic=False,
+    ):
+        mean, log_std = self.forward(
+            voxel_init_obs, voxel_des_obs, video_obs, graph_init_obs, graph_des_obs
+        )
         std = log_std.exp()
         if deterministic:
             pre_tanh = mean
@@ -107,11 +140,11 @@ class SACCritic(nn.Module):
         # Shared conv encoders for Q1
         self.conv3d_q1 = nn.Sequential(
             tsnn.Conv3d(1, 2, kernel_size=(6, 6, 6), stride=(4, 4, 4)),
-            nn.SiLU(),
+            SparseSiLU(),
             tsnn.Conv3d(2, 4, kernel_size=(6, 6, 6), stride=(4, 4, 4)),
-            nn.SiLU(),
+            SparseSiLU(),
             tsnn.Conv3d(4, 8, kernel_size=(6, 6, 6), stride=(4, 4, 4)),
-            nn.SiLU(),
+            SparseSiLU(),
         )
         self.conv2d_q1 = nn.Sequential(
             nn.Conv2d(3, 6, kernel_size=(6, 6), stride=(4, 4)),
@@ -136,11 +169,11 @@ class SACCritic(nn.Module):
         # Twin Q2
         self.conv3d_q2 = nn.Sequential(
             tsnn.Conv3d(1, 2, kernel_size=(6, 6, 6), stride=(4, 4, 4)),
-            nn.SiLU(),
+            SparseSiLU(),
             tsnn.Conv3d(2, 4, kernel_size=(6, 6, 6), stride=(4, 4, 4)),
-            nn.SiLU(),
+            SparseSiLU(),
             tsnn.Conv3d(4, 8, kernel_size=(6, 6, 6), stride=(4, 4, 4)),
-            nn.SiLU(),
+            SparseSiLU(),
         )
         self.conv2d_q2 = nn.Sequential(
             nn.Conv2d(3, 6, kernel_size=(6, 6), stride=(4, 4)),
@@ -163,13 +196,17 @@ class SACCritic(nn.Module):
 
     def forward(self, voxel_obs, video_obs, graph_obs, action):
         # Encoder Q1
-        x_v1 = self.conv3d_q1(voxel_obs).view(voxel_obs.size(0), -1)
+        x_v1_st = self.conv3d_q1(voxel_obs)
+        x_v1_dense = x_v1_st.dense()
+        x_v1 = x_v1_dense.view(x_v1_dense.size(0), -1)
         x_vid1 = self.conv2d_q1(video_obs).view(video_obs.size(0), -1)
         graph_obs_q1 = self.graph_encoder_q1(graph_obs)
         x1 = torch.cat([x_v1, x_vid1, graph_obs_q1, action], dim=-1)
         q1 = self.q1_fc(x1)
         # Encoder Q2
-        x_v2 = self.conv3d_q2(voxel_obs).view(voxel_obs.size(0), -1)
+        x_v2_st = self.conv3d_q2(voxel_obs)
+        x_v2_dense = x_v2_st.dense()
+        x_v2 = x_v2_dense.view(x_v2_dense.size(0), -1)
         x_vid2 = self.conv2d_q2(video_obs).view(video_obs.size(0), -1)
         graph_obs_q2 = self.graph_encoder_q2(graph_obs)
         x2 = torch.cat([x_v2, x_vid2, graph_obs_q2, action], dim=-1)
@@ -267,13 +304,23 @@ class SACTrainer:
             batch_size, dtype=torch.int, device=self.device
         )
 
-    def select_action(self, voxel_obs, video_obs, graph_obs, deterministic=False):
+    def select_action(
+        self,
+        voxel_init_obs,
+        voxel_des_obs,
+        video_obs,
+        graph_init_obs,
+        graph_des_obs,
+        deterministic=False,
+    ):
         self.actor.eval()
         with torch.no_grad():
             action, _ = self.actor(
-                voxel_obs.to(self.device),
+                voxel_init_obs,
+                voxel_des_obs,
                 video_obs.to(self.device),
-                graph_obs.to(self.device),
+                graph_init_obs.to(self.device),
+                graph_des_obs.to(self.device),
             )
         self.actor.train()
         return action.cpu()
@@ -384,8 +431,8 @@ class SACTrainer:
         init_voxels = self.voxel_buffer.get(init_voxel_ids.unique())
         des_voxels = self.voxel_buffer.get(des_voxel_ids.unique())
         # Convert to torchsparse
-        init_voxels = batch_sparse_coo_to_torchsparse(init_voxels)
-        des_voxels = batch_sparse_coo_to_torchsparse(des_voxels)
+        init_voxels = sparse_coo_to_torchsparse(init_voxels)
+        des_voxels = sparse_coo_to_torchsparse(des_voxels)
         return init_voxels, des_voxels
 
     def get_batch_electronics_graphs(
@@ -491,11 +538,20 @@ def run_training(
         )
         prev_video_obs = video_obs
 
+    print(
+        f"Buffer prefill steps ended. Elapsed time: {time.time() - prefill_start_time}"
+    )
+    camera.stop_recording(save_to_filename="video.mp4", fps=50)
+
+    # convert because now the voxel obs need to be torchsparse
+    voxel_init_obs = sparse_coo_to_torchsparse(voxel_init_obs)
+    voxel_des_obs = sparse_coo_to_torchsparse(voxel_des_obs)
+
     # Main training loop
     for step in range(num_steps):
         # Get action from policy
         action = trainer.select_action(
-            voxel_init_obs, voxel_des_obs, video_obs, graph_init_obs
+            voxel_init_obs, voxel_des_obs, video_obs, graph_init_obs, graph_des_obs
         )
 
         # Step environment
