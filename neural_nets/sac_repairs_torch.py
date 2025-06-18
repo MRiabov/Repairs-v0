@@ -1,4 +1,5 @@
 import copy
+import time
 from typing import Dict, Tuple
 
 from examples.box_to_pos_task import MoveBoxSetup
@@ -484,7 +485,7 @@ def run_training(
         singleton_buffer_size=singleton_buffer_size,
         batch_size=ml_batch_dim,
     )
-
+    # FIXME: I'm finding that voxel_init_obs is 2,256,256,256 when it should be 4,2,256,256,256
     voxel_init_obs, voxel_des_obs, video_obs, graph_init_obs, graph_des_obs = (
         env.reset()
     )
@@ -505,9 +506,20 @@ def run_training(
         voxel_des_obs,
     )
 
+    prefill_start_time = time.time()
+    # debug
+    camera = env.__dict__["concurrent_scenes_data"][0].cameras[0]
+    camera.start_recording()
+    action_bound_min = torch.tensor(command_cfg["min_bounds"])
+    action_bound_max = torch.tensor(command_cfg["max_bounds"])
+
     # Prefill replay buffer with random actions
     for _ in range(prefill_steps):
-        rand_action = torch.randn((ml_batch_dim, action_dim), device=trainer.device)
+        rand_action = (
+            torch.rand((ml_batch_dim, action_dim), device=trainer.device)
+            * (action_bound_max - action_bound_min)
+            + action_bound_min
+        )
         # note: action should probably be rescaled to franka arm space.
         (
             voxel_init_obs,
@@ -685,7 +697,19 @@ if __name__ == "__main__":
         "progressive": True,  # TODO : if progressive, use progressive reward calc instead.
     }
 
-    command_cfg = {}
+    command_cfg = {
+        "min_bounds": [
+            *(-0.8, -0.8, 0),  # XYZ position min
+            *(-1.0, -1.0, -1.0, -1.0),  # Quaternion components (w,x,y,z) min
+            *(0.0, 0.0),  # Gripper control min
+        ],
+        "max_bounds": [
+            *(0.8, 0.8, 1.0),  # XYZ position max
+            # ^note: xyz is dep
+            *(1.0, 1.0, 1.0, 1.0),
+            *(1.0, 1.0),  # Quaternion components (w,x,y,z) max
+        ],
+    }
 
     action_dim = env_cfg["num_actions"]
     num_cameras = 2
@@ -714,7 +738,8 @@ if __name__ == "__main__":
     singleton_buffer_size = (
         200 if debug else 10_000
     )  # was 200_000, reduced due to GPU constraints.
-    min_buffer_len = 300 if debug else 10_000
+    min_buffer_len = 40 if debug else 10_000
+    prefill_steps = min_buffer_len // batch_size + 1
     # ^46gb at 2*256*256*7*int8 res!!!
     sample_batch_size = 256
 
@@ -730,4 +755,5 @@ if __name__ == "__main__":
         electronics_graph_dim=electronics_graph_encoded_dim,
         buffer_size=buffer_size,
         singleton_buffer_size=singleton_buffer_size,
+        prefill_steps=prefill_steps,
     )
