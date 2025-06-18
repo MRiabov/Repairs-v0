@@ -23,7 +23,7 @@ Example:
 """
 
 import torch
-from typing import Optional, Tuple
+from repairs_components.processing.voxel_export import sparse_arr_put, sparse_arr_remove
 from singleton_buffer import SingletonBuffer
 
 
@@ -86,27 +86,13 @@ class SparseVoxelBuffer(SingletonBuffer[torch.Tensor]):
             "Some of the available positions have data in them."
         )
         set_at_positions = available_positions[:count_necessary_positions]
-        new_voxel_batch_indices = voxel_batch.indices()
-        # 3) Remap each unique batch index in `voxel_batch` so that it points
-        #    to the corresponding free row selected in `set_at_positions`
-        for i in torch.arange(count_necessary_positions):
-            input_pos = input_voxel_batch_positions[i]
-            set_at_pos = set_at_positions[i]
-            # iteratively remap each unique batch index in `voxel_batch` so that it points
-            # to the corresponding free row selected in `set_at_positions`
-            new_voxel_batch_indices = new_voxel_batch_indices.where(
-                new_voxel_batch_indices[0] == input_pos, set_at_pos
-            )
 
-        self._buffer = torch.sparse_coo_tensor(
-            torch.cat((self._buffer.indices(), new_voxel_batch_indices), dim=1),
-            torch.cat((self._buffer.values(), voxel_batch.values()), dim=0),
-            size=(self._buffer.size(0), *voxel_batch.shape[1:]),
-            device=self.device,
+        self._buffer = sparse_arr_put(
+            self._buffer, voxel_batch, set_at_positions, dim=0
         )
-        self._buffer = self._buffer.coalesce()
         self.known_used_positions[set_at_positions] = True
         return set_at_positions
+        # note: I've chnaged this to use the util, rollback if problematic.
 
     def get(self, item_ids: torch.IntTensor) -> torch.Tensor:
         """Retrieve an item by its ID.
@@ -123,17 +109,22 @@ class SparseVoxelBuffer(SingletonBuffer[torch.Tensor]):
         assert (self.known_used_positions[item_ids]).all(), (
             "Some of queried positions were empty"
         )
-        return self._buffer[item_ids]
-
-    # FIXME: no cleanup?
+        return self._buffer.index_select(0, item_ids)  # get by batch dim.
 
     def cleanup(self, active_ids: torch.IntTensor) -> None:
         """Remove items that are no longer in use."""
-        assert (self.known_used_positions[active_ids]).any(), (
-            "Some of queried positions were empty"
+        assert (self.known_used_positions[active_ids]).all(), (
+            "Not all active positions are marked as in use"
         )
-        self.known_used_positions[active_ids] = False
+        updated_known_used_positions = torch.zeros_like(self.known_used_positions)
+        updated_known_used_positions[active_ids] = True
+        self.known_used_positions = updated_known_used_positions
+        remove_idx = torch.arange(self.known_used_positions.shape[0])[
+            ~updated_known_used_positions
+        ]  # basically a nonzero.
 
         # cleanup assuming the tensor is dense:
-        # todo: all edge idx that are of not from active_ids should be removed.
-        self._buffer[active_ids] = torch.zeros_like(self._buffer[active_ids])
+        # doc: all edge idx that are of not from active_ids should be removed.
+        self._buffer = sparse_arr_remove(
+            self._buffer.coalesce(), remove_idx=remove_idx, dim=0
+        )

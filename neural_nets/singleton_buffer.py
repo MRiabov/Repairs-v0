@@ -106,6 +106,7 @@ class SingletonBuffer(Generic[T]):
         assert (self.known_used_positions[active_ids]).any(), (
             "Some of queried positions were empty"
         )
-        self.known_used_positions[active_ids] = False
+        raise NotImplementedError
+        # self.known_used_positions[active_ids] = False
         # cleanup assuming the tensor is dense:
-        self._buffer[active_ids] = torch.zeros_like(self._buffer[active_ids])
+        # self._buffer.index_select(0, active_ids) = torch.zeros_like(self._buffer[active_ids])
