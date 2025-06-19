@@ -109,7 +109,7 @@ class SparseVoxelBuffer(SingletonBuffer[torch.Tensor]):
         assert (self.known_used_positions[item_ids]).all(), (
             "Some of queried positions were empty"
         )
-        return self._buffer.index_select(0, item_ids)  # get by batch dim.
+        return self._buffer.index_select(0, item_ids.long())  # get by batch dim.
 
     def cleanup(self, active_ids: torch.IntTensor) -> None:
         """Remove items that are no longer in use."""

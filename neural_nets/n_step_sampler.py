@@ -4,16 +4,18 @@ from torchrl.data.replay_buffers.samplers import Sampler
 import torch
 
 
-class NStepSampler(Sampler):
-    def __init__(self, n: int = 2, gamma: float = 0.99, batch_size: int = 32):
+class StepAndNextSampler(Sampler):
+    def __init__(self, n: int = 1, gamma: float = 0.99, batch_size: int = 32):
         super().__init__()
         self.n = n
         self.gamma = gamma
         self.batch_size = batch_size
 
     def sample(self, buffer, batch_size: int = None):
-        max_idx = len(buffer) - self.n
-        assert max_idx > 0, "Buffer too small for n-step sampling."
+        # get the highest filled index
+        # max_idx = buffer["index"].nonzero().squeeze(1)[-1] # below is faster.
+        max_idx = min(buffer["index"].max().item(), buffer["index"].shape[0])
+        assert max_idx > self.n, "Buffer too small for n-step sampling."
         if batch_size is None:
             batch_size = self.batch_size
 
@@ -23,16 +25,7 @@ class NStepSampler(Sampler):
         steps = torch.arange(self.n + 1, device=buffer.device)
         index_matrix = selected_idxs.unsqueeze(1) + steps.unsqueeze(0)  # [B, n+1]
 
-        # Flatten to get all required indices at once
-        flat_idxs = index_matrix.flatten()  # [B * (n+1)]
-
-        # Sample from buffer in one pass
-        flat_batch = buffer._storage[flat_idxs]  # List[TensorDict] of B*(n+1)
-
-        # Stack and reshape to [B, n+1]
-        td = tensordict.stack(flat_batch, dim=0).reshape(batch_size, self.n + 1)
-
-        return td, {}
+        return index_matrix, {}
 
     def state_dict(self):
         return {
@@ -50,7 +43,7 @@ class NStepSampler(Sampler):
 
     def _empty(self):
         """Create an uninitialized clone."""
-        return NStepSampler(self.n, self.gamma, self.batch_size)
+        return StepAndNextSampler(self.n, self.gamma, self.batch_size)
 
     def dumps(self) -> bytes:
         """Serialize the sampler state."""

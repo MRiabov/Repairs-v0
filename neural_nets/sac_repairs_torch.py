@@ -13,7 +13,7 @@ from torch_geometric.data import Batch
 from graphs import GraphEncoder
 import torchsparse.nn as tsnn
 import torchsparse
-from n_step_buffer_util import NStepSampler
+from n_step_sampler import StepAndNextSampler
 
 from sparse_voxel_buffer import SparseVoxelBuffer
 import tensordict
@@ -395,7 +395,7 @@ class SACTrainer:
         self.replay_buffer = TensorDictReplayBuffer(
             storage=self.buffer_storage,
             batch_size=batch_size,
-            sampler=NStepSampler(n=2, gamma=0.99, batch_size=sample_batch_size),
+            sampler=StepAndNextSampler(n=1, gamma=0.99, batch_size=sample_batch_size),
         )
         # Singleton storages
         # Sparse voxel & graph storage
@@ -542,6 +542,8 @@ class SACTrainer:
         self, init_voxel_ids: torch.Tensor, des_voxel_ids: torch.Tensor
     ) -> tuple[torchsparse.SparseTensor, torchsparse.SparseTensor]:
         """Retrieve voxel tensors from the sparse buffer for a batch."""
+        assert init_voxel_ids.shape == des_voxel_ids.shape, "Batch sizes must match"
+        assert init_voxel_ids.ndim == 1, "Batch sizes must be 1D"
         # Get unique voxel IDs in this batch and get from buffer
         init_voxels = self.voxel_buffer.get(init_voxel_ids.unique())
         des_voxels = self.voxel_buffer.get(des_voxel_ids.unique())
@@ -707,29 +709,33 @@ def run_training(
             done=dones,
         )
 
-        batch, _ = trainer.replay_buffer.sample()
+        batch = trainer.replay_buffer.sample()
+        prev_step_batch = {k: v[:, 0] for k, v in batch.items()}
+        next_step_batch = {k: v[:, 1] for k, v in batch.items()}
 
         # Get voxel tensors for the batch
         init_voxels, des_voxels = trainer.get_batch_voxels(
-            batch["init_voxel_id"], batch["des_voxel_id"]
-        )
+            prev_step_batch["init_voxel_id"],
+            prev_step_batch["des_voxel_id"],  # don't take the "next".
+        )  # FIXME: why are these batches all zeros?
 
         # Get electronics graph tensors for the batch
         init_graphs, des_graphs = trainer.get_batch_electronics_graphs(
-            batch["init_electronics_graph_id"], batch["des_electronics_graph_id"]
+            prev_step_batch["init_electronics_graph_id"],
+            prev_step_batch["des_electronics_graph_id"],
         )
 
         # Update networks
         cl, al, alpha = trainer.update(
             v_init=init_voxels,
             v_des=des_voxels,
-            vid_obs=batch["video_obs"].to(torch.bfloat16) / 255,
+            vid_obs=prev_step_batch["video_obs"].to(torch.bfloat16) / 255,
             g_init=init_graphs,
             g_des=des_graphs,
-            a=batch["action"],
-            r=batch["reward"],
-            # next_vid=batch["next_video_obs"],
-            d=batch["done"],
+            a=prev_step_batch["action"],
+            r=prev_step_batch["reward"],
+            next_vid=next_step_batch["video_obs"],
+            d=prev_step_batch["done"],
         )
 
         if step % 1000 == 0:
