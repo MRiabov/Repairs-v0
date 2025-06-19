@@ -9,18 +9,20 @@ from torch_scatter import scatter_add
 
 
 class GATLayer(MessagePassing):
-    def __init__(self, in_channels, out_channels, heads=2):
+    def __init__(self, in_channels, out_channels, heads=2, dtype=torch.bfloat16):
         super().__init__(aggr="sum", node_dim=0)
         self.heads = heads
         self.out_channels = out_channels
 
         # linear transformation for node features
-        self.lin = nn.Linear(in_channels, heads * out_channels, bias=False)
+        self.lin = nn.Linear(in_channels, heads * out_channels, bias=False, dtype=dtype)
 
         # Attention mechanism parameters
         # one parameter per head and out_channel
-        self.att_targ = nn.Parameter(torch.Tensor(1, heads, out_channels))
-        self.att_source = nn.Parameter(torch.Tensor(1, heads, out_channels))
+        self.att_targ = nn.Parameter(torch.Tensor(1, heads, out_channels, dtype=dtype))
+        self.att_source = nn.Parameter(
+            torch.Tensor(1, heads, out_channels, dtype=dtype)
+        )
         # att_targ - parameters of attention for target nodes (to which pass)
         # att_source - parameters of attention for source nodes (from which pass)
         # to compute attention in GAT they are multiplied with messages and summed; and softmax is applied.
@@ -28,7 +30,7 @@ class GATLayer(MessagePassing):
         # (the aggregated messages are passed forward with `propagate` function consisting of - `message`, `aggregate` and `update`)
 
         # Optional bias
-        self.bias = nn.Parameter(torch.Tensor(out_channels))
+        self.bias = nn.Parameter(torch.Tensor(out_channels, dtype=dtype))
         self.reset_parameters()
         # ^note: # could be made nn.Linear but less efficient.
 
@@ -72,11 +74,13 @@ class GATLayer(MessagePassing):
 
 
 class GAT(nn.Module):
-    def __init__(self, num_features, hidden_dim, num_classes, heads: int):
+    def __init__(
+        self, num_features, hidden_dim, num_classes, heads: int, dtype=torch.bfloat16
+    ):
         super(GAT, self).__init__()
-        self.gat1 = GATLayer(num_features, hidden_dim, heads=heads)
-        self.gat2 = GATLayer(hidden_dim, num_classes, heads=heads)
-        self.learnable_empty = nn.Parameter(torch.zeros(num_classes))
+        self.gat1 = GATLayer(num_features, hidden_dim, heads=heads, dtype=dtype)
+        self.gat2 = GATLayer(hidden_dim, num_classes, heads=heads, dtype=dtype)
+        self.learnable_empty = nn.Parameter(torch.zeros(num_classes, dtype=dtype))
 
     def forward(self, data: Data):
         x, edge_index = data.x, data.edge_index
@@ -99,7 +103,9 @@ class GraphEncoder(nn.Module):
     learnable gating mechanism similar to weighted mean pooling.
     """
 
-    def __init__(self, num_features, hidden_dim, out_dim, heads: int):
+    def __init__(
+        self, num_features, hidden_dim, out_dim, heads: int, dtype=torch.bfloat16
+    ):
         """Parameters
         ----------
         num_features : int
@@ -113,9 +119,10 @@ class GraphEncoder(nn.Module):
         """
         super(GraphEncoder, self).__init__()
         # Two-layer GAT encoder that returns node embeddings of size ``out_dim``.
-        self.gat = GAT(num_features, hidden_dim, out_dim, heads=heads)
+        self.gat = GAT(num_features, hidden_dim, out_dim, heads=heads, dtype=dtype)
         # Gating network that outputs a scalar gate for every node.
-        self.gate = nn.Linear(out_dim, 1)
+        self.gate = nn.Linear(out_dim, 1, dtype=dtype)
+        self.dtype=dtype
 
     def forward(self, batch: Batch):
         """Return a gated, graph-level embedding.
@@ -138,10 +145,10 @@ class GraphEncoder(nn.Module):
             pooled = torch.zeros(
                 (num_graphs, gated_emb.size(-1)),
                 device=gated_emb.device,
-                dtype=gated_emb.dtype,
+                dtype=self.dtype
             )
             norm = torch.ones(
-                (num_graphs, 1), device=gated_emb.device, dtype=gated_emb.dtype
+                (num_graphs, 1), device=gated_emb.device, dtype=self.dtype
             )  # Or 1s to avoid div by zero
         else:
             pooled = scatter_add(gated_emb, batch.batch, dim=0, dim_size=num_graphs)

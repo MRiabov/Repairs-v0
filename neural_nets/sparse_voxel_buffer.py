@@ -74,6 +74,7 @@ class SparseVoxelBuffer(SingletonBuffer[torch.Tensor]):
         # code tldr: add sparse tensors to another sparse tensor at available position.
         assert voxel_batch.ndim == 4, "voxel_batch must be a 4D tensor"
         assert voxel_batch.is_sparse, "voxel_batch must be a sparse tensor"
+        assert voxel_batch.values().numel() > 0, "voxel_batch must have non-zero values"
         available_positions = torch.nonzero(
             torch.logical_not(self.known_used_positions)
         ).squeeze(1)

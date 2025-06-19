@@ -204,7 +204,7 @@ class SACCritic(nn.Module):
             tsnn.Conv3d(4, 8, kernel_size=(6, 6, 6), stride=(4, 4, 4)),
             tsnn.SiLU(),
             tsnn.BatchNorm(8),
-        )
+        )  # note: they are float16 by default. Could set to tf32 for better performance. bfloat16 is not supported.
         # Given input shape (D0, H0, W0) = (256, 256, 256) and 3 Conv3d layers each with kernel_size=6, stride=4:
         # Layer 1: D1 = floor((256 - 6) / 4) + 1 = 63,  same for H1, W1
         # Layer 2: D2 = floor((63 - 6) / 4) + 1 = 15,   same for H2, W2
@@ -212,73 +212,86 @@ class SACCritic(nn.Module):
         # Output channels after last Conv3d = 8
         # Total flattened output dim = 8 * 3 * 3 * 3 = 216
         self.vid1_q1 = nn.Sequential(
-            nn.Conv2d(3, 6, kernel_size=(6, 6), stride=(4, 4)),
+            nn.Conv2d(7, 8, kernel_size=(6, 6), stride=(4, 4), dtype=torch.bfloat16),
+            nn.BatchNorm2d(8, dtype=torch.bfloat16),
             nn.SiLU(),
-            nn.BatchNorm2d(6),
-            nn.Conv2d(6, 8, kernel_size=(6, 6), stride=(4, 4)),
+            nn.Conv2d(8, 12, kernel_size=(6, 6), stride=(4, 4), dtype=torch.bfloat16),
+            nn.BatchNorm2d(12, dtype=torch.bfloat16),
             nn.SiLU(),
-            nn.BatchNorm2d(8),
-            nn.Conv2d(8, 12, kernel_size=(6, 6), stride=(4, 4)),
+            nn.Conv2d(12, 12, kernel_size=(6, 6), stride=(4, 4), dtype=torch.bfloat16),
+            nn.BatchNorm2d(12, dtype=torch.bfloat16),
             nn.SiLU(),
-            nn.BatchNorm2d(12),
         )
         self.vid2_q1 = nn.Sequential(
-            nn.Conv2d(3, 6, kernel_size=(6, 6), stride=(4, 4)),
+            nn.Conv2d(7, 8, kernel_size=(6, 6), stride=(4, 4), dtype=torch.bfloat16),
+            nn.BatchNorm2d(8, dtype=torch.bfloat16),
             nn.SiLU(),
-            nn.BatchNorm2d(6),
-            nn.Conv2d(6, 8, kernel_size=(6, 6), stride=(4, 4)),
+            nn.Conv2d(8, 12, kernel_size=(6, 6), stride=(4, 4), dtype=torch.bfloat16),
+            nn.BatchNorm2d(12, dtype=torch.bfloat16),
             nn.SiLU(),
-            nn.BatchNorm2d(8),
-            nn.Conv2d(8, 12, kernel_size=(6, 6), stride=(4, 4)),
+            nn.Conv2d(12, 12, kernel_size=(6, 6), stride=(4, 4), dtype=torch.bfloat16),
+            nn.BatchNorm2d(12, dtype=torch.bfloat16),
             nn.SiLU(),
-            nn.BatchNorm2d(12),
         )
         combined_q_dim = 216 * 2 + 324 * 2 + electronics_graph_out_dim * 2 + action_dim
         self.q1_fc = nn.Sequential(
-            nn.Linear(combined_q_dim, 256),
+            nn.Linear(combined_q_dim, 256, dtype=torch.bfloat16),
+            nn.BatchNorm1d(256, dtype=torch.bfloat16),
             nn.SiLU(),
-            nn.BatchNorm1d(256),
-            nn.Linear(256, 256),
+            nn.Linear(256, 256, dtype=torch.bfloat16),
+            nn.BatchNorm1d(256, dtype=torch.bfloat16),
             nn.SiLU(),
-            nn.BatchNorm1d(256),
-            nn.Linear(256, 1),
+            nn.Linear(256, 1, dtype=torch.bfloat16),
         )
-        self.graph_encoder_q1 = GraphEncoder(4, 256, electronics_graph_out_dim, heads=2)
+        self.graph_encoder_q1 = GraphEncoder(
+            4, 256, electronics_graph_out_dim, heads=2, dtype=torch.bfloat16
+        )
 
         # Twin Q2
         self.conv3d_q2 = nn.Sequential(
             tsnn.Conv3d(1, 2, kernel_size=(6, 6, 6), stride=(4, 4, 4)),
-            tsnn.SiLU(),
             tsnn.BatchNorm(2),
+            tsnn.SiLU(),
             tsnn.Conv3d(2, 4, kernel_size=(6, 6, 6), stride=(4, 4, 4)),
-            tsnn.SiLU(),
             tsnn.BatchNorm(4),
-            tsnn.Conv3d(4, 8, kernel_size=(6, 6, 6), stride=(4, 4, 4)),
             tsnn.SiLU(),
+            tsnn.Conv3d(4, 8, kernel_size=(6, 6, 6), stride=(4, 4, 4)),
             tsnn.BatchNorm(8),
+            tsnn.SiLU(),
         )
-        self.conv2d_q2 = nn.Sequential(
-            nn.Conv2d(3, 6, kernel_size=(6, 6), stride=(4, 4)),
+        self.vid1_q2 = nn.Sequential(  # 7 channels!
+            nn.Conv2d(7, 8, kernel_size=(6, 6), stride=(4, 4), dtype=torch.bfloat16),
+            nn.BatchNorm2d(8, dtype=torch.bfloat16),
             nn.SiLU(),
-            nn.BatchNorm2d(6),
-            nn.Conv2d(6, 8, kernel_size=(6, 6), stride=(4, 4)),
+            nn.Conv2d(8, 12, kernel_size=(6, 6), stride=(4, 4), dtype=torch.bfloat16),
+            nn.BatchNorm2d(12, dtype=torch.bfloat16),
             nn.SiLU(),
-            nn.BatchNorm2d(8),
-            nn.Conv2d(8, 12, kernel_size=(6, 6), stride=(4, 4)),
+            nn.Conv2d(12, 12, kernel_size=(6, 6), stride=(4, 4), dtype=torch.bfloat16),
+            nn.BatchNorm2d(12, dtype=torch.bfloat16),
             nn.SiLU(),
-            nn.BatchNorm2d(12),
+        )
+        self.vid2_q2 = nn.Sequential(  # 7 channels!
+            nn.Conv2d(7, 8, kernel_size=(6, 6), stride=(4, 4), dtype=torch.bfloat16),
+            nn.BatchNorm2d(8, dtype=torch.bfloat16),
+            nn.SiLU(),
+            nn.Conv2d(8, 12, kernel_size=(6, 6), stride=(4, 4), dtype=torch.bfloat16),
+            nn.BatchNorm2d(12, dtype=torch.bfloat16),
+            nn.SiLU(),
+            nn.Conv2d(12, 12, kernel_size=(6, 6), stride=(4, 4), dtype=torch.bfloat16),
+            nn.BatchNorm2d(12, dtype=torch.bfloat16),
+            nn.SiLU(),
         )
         self.q2_fc = nn.Sequential(
-            nn.Linear(combined_q_dim, 256),
+            nn.Linear(combined_q_dim, 256, dtype=torch.bfloat16),
+            nn.BatchNorm1d(256, dtype=torch.bfloat16),
             nn.SiLU(),
-            nn.BatchNorm1d(256),
-            nn.Linear(256, 256),
+            nn.Linear(256, 256, dtype=torch.bfloat16),
+            nn.BatchNorm1d(256, dtype=torch.bfloat16),
             nn.SiLU(),
-            nn.BatchNorm1d(256),
-            nn.Linear(256, 1),
+            nn.Linear(256, 1, dtype=torch.bfloat16),
         )
         self.graph_encoder_q2 = GraphEncoder(
-            216, 256, electronics_graph_out_dim, heads=2
+            216, 256, electronics_graph_out_dim, heads=2, dtype=torch.bfloat16
         )
 
     def forward(
@@ -292,36 +305,71 @@ class SACCritic(nn.Module):
     ):
         # Encoder Q1
         # voxels
-        x_v1_st = self.conv3d_q1(voxel_init_obs)
-        x_v2_st = self.conv3d_q1(voxel_des_obs)
-        x_v1_dense = x_v1_st.dense()
-        x_v2_dense = x_v2_st.dense()
-        x_v1 = x_v1_dense.view(x_v1_dense.size(0), -1)  # why this?
-        x_v2 = x_v2_dense.view(x_v2_dense.size(0), -1)
+        x_vox_init_q1 = self.conv3d_q1(voxel_init_obs)
+        x_vox_des_q1 = self.conv3d_q1(voxel_des_obs)
+        x_vox_init_q1_dense = x_vox_init_q1.dense()
+        x_vox_des_q1_dense = x_vox_des_q1.dense()
+        x_vox_init_q1 = x_vox_init_q1_dense.view(x_vox_init_q1_dense.size(0), -1).to(
+            torch.bfloat16
+        )
+        x_vox_des_q1 = x_vox_des_q1_dense.view(x_vox_des_q1_dense.size(0), -1).to(
+            torch.bfloat16
+        )
         # vid
         x_vid1 = self.vid1_q1(video_obs[:, 0]).view(video_obs.size(0), -1)
         x_vid2 = self.vid2_q1(video_obs[:, 1]).view(video_obs.size(0), -1)
         # graph
         graph_init_q1 = self.graph_encoder_q1(graph_init_obs)
         graph_des_q1 = self.graph_encoder_q1(graph_des_obs)
+
         x1 = torch.cat(
-            [x_v1, x_vid1, x_vid2, graph_init_q1, graph_des_q1, action], dim=-1
-        )
+            [
+                x_vox_init_q1,
+                x_vox_des_q1,
+                x_vid1,
+                x_vid2,
+                graph_init_q1,
+                graph_des_q1,
+                action,
+            ],
+            dim=-1,
+        ).to(dtype=torch.bfloat16)
 
         q1 = self.q1_fc(x1)
         # Encoder Q2
         # voxels
-        x_v2_st = self.conv3d_q2(voxel_init_obs)
-        x_v2_st = self.conv3d_q2(voxel_des_obs)
+        x_vox_init_q2 = self.conv3d_q2(voxel_init_obs)
+        x_vox_des_q2 = self.conv3d_q2(voxel_des_obs)
+        x_vox_init_q2_dense = x_vox_init_q2.dense()
+        x_vox_des_q2_dense = x_vox_des_q2.dense()
+        x_vox_init_q2 = x_vox_init_q2_dense.view(x_vox_init_q2_dense.size(0), -1).to(
+            torch.bfloat16
+        )
+        x_vox_des_q2 = x_vox_des_q2_dense.view(x_vox_des_q2_dense.size(0), -1).to(
+            torch.bfloat16
+        )
         # vid
-        x_v2_dense = x_v2_st.dense()
-        x_v2 = x_v2_dense.view(x_v2_dense.size(0), -1)
-        x_vid2 = self.conv2d_q2(video_obs[:, 0]).view(video_obs.size(0), -1)
-        x_vid2 = self.conv2d_q2(video_obs[:, 1]).view(video_obs.size(0), -1)
+        x_vid1_q2 = self.vid1_q2(video_obs[:, 0])
+        x_vid1_q2_dense = x_vid1_q2.dense()
+        x_vid1_q2 = x_vid1_q2_dense.view(x_vid1_q2_dense.size(0), -1).to(torch.bfloat16)
+        x_vid2_q2 = self.vid2_q2(video_obs[:, 1])
+        x_vid2_q2_dense = x_vid2_q2.dense()
+        x_vid2_q2 = x_vid2_q2_dense.view(x_vid2_q2_dense.size(0), -1).to(torch.bfloat16)
         # graph
-        graph_obs_q2 = self.graph_encoder_q2(graph_init_obs)
-        graph_obs_q2 = self.graph_encoder_q2(graph_des_obs)
-        x2 = torch.cat([x_v2, x_vid2, graph_obs_q2, action], dim=-1)
+        graph_init_q2 = self.graph_encoder_q2(graph_init_obs)
+        graph_des_q2 = self.graph_encoder_q2(graph_des_obs)
+        x2 = torch.cat(
+            [
+                x_vox_init_q2,
+                x_vox_des_q2,
+                x_vid1_q2,
+                x_vid2_q2,
+                graph_init_q2,
+                graph_des_q2,
+                action,
+            ],
+            dim=-1,
+        ).to(dtype=torch.bfloat16)
         q2 = self.q2_fc(x2)
 
         return q1, q2
@@ -440,19 +488,21 @@ class SACTrainer:
         self.actor.train()
         return action.cpu()
 
-    def update(self, v_init, v_des, vid_obs, g_init, g_des, a, r, next_vid, d):
+    def update(self, vox_init, vox_des, vid_obs, g_init, g_des, a, r, next_vid, d):
         with torch.no_grad():
-            na, nlp = self.actor.sample_action(v_des, v_des, next_vid, g_des, g_des)
-            q1n, q2n = self.critic_target(v_des, next_vid, g_des, na)
+            na, nlp = self.actor.sample_action(
+                vox_init, vox_des, next_vid, g_des, g_des
+            )
+            q1n, q2n = self.critic_target(vox_init, vox_des, vid_obs, g_init, g_des, na)
             qn = torch.min(q1n, q2n) - self.log_alpha.exp() * nlp
             target = r.unsqueeze(-1) + self.gamma * (1 - d.unsqueeze(-1)) * qn
-        q1, q2 = self.critic(v_init, vid_obs, g_init, a)
+        q1, q2 = self.critic(vox_init, vox_des, vid_obs, g_init, g_des, a)
         cl = F.mse_loss(q1, target) + F.mse_loss(q2, target)
         self.critic_optimizer.zero_grad()
         cl.backward()
         self.critic_optimizer.step()
-        a2, lp = self.actor.sample_action(v_init, v_des, vid_obs, g_init, g_des)
-        q1n, q2n = self.critic(v_init, vid_obs, g_init, a2)
+        a2, lp = self.actor.sample_action(vox_init, vox_des, vid_obs, g_init, g_des)
+        q1n, q2n = self.critic(vox_init, vox_des, vid_obs, g_init, g_des, a2)
         al = (self.log_alpha.exp() * lp - torch.min(q1n, q2n)).mean()
         self.actor_optimizer.zero_grad()
         al.backward()
@@ -545,8 +595,8 @@ class SACTrainer:
         assert init_voxel_ids.shape == des_voxel_ids.shape, "Batch sizes must match"
         assert init_voxel_ids.ndim == 1, "Batch sizes must be 1D"
         # Get unique voxel IDs in this batch and get from buffer
-        init_voxels = self.voxel_buffer.get(init_voxel_ids.unique())
-        des_voxels = self.voxel_buffer.get(des_voxel_ids.unique())
+        init_voxels = self.voxel_buffer.get(init_voxel_ids)
+        des_voxels = self.voxel_buffer.get(des_voxel_ids)
         # Convert to torchsparse
         init_voxels = sparse_coo_to_torchsparse(init_voxels)
         des_voxels = sparse_coo_to_torchsparse(des_voxels)
@@ -717,7 +767,7 @@ def run_training(
         init_voxels, des_voxels = trainer.get_batch_voxels(
             prev_step_batch["init_voxel_id"],
             prev_step_batch["des_voxel_id"],  # don't take the "next".
-        )  # FIXME: why are these batches all zeros?
+        )
 
         # Get electronics graph tensors for the batch
         init_graphs, des_graphs = trainer.get_batch_electronics_graphs(
@@ -727,8 +777,8 @@ def run_training(
 
         # Update networks
         cl, al, alpha = trainer.update(
-            v_init=init_voxels,
-            v_des=des_voxels,
+            vox_init=init_voxels,
+            vox_des=des_voxels,
             vid_obs=prev_step_batch["video_obs"].to(torch.bfloat16) / 255,
             g_init=init_graphs,
             g_des=des_graphs,

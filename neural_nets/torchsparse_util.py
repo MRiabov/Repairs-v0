@@ -22,8 +22,10 @@ def batch_sparse_coo_to_torchsparse(sparse_coos: list[torch.Tensor]):
 def sparse_coo_to_torchsparse(sparse_coo: torch.Tensor, dtype=torch.float16):
     coo = sparse_coo.coalesce()
     device = torch.device("cuda")
+    print(sparse_coo.shape)
+    
     return torchsparse.SparseTensor(
         feats=coo.values().unsqueeze(-1).to(dtype=dtype, device=device),
-        coords=coo.indices().to(dtype=torch.int32, device=device),
-        spatial_range=sparse_coo.shape,
+        coords=coo.indices().to(dtype=torch.int32, device=device).T, # NOTE: added `.T`.
+        spatial_range=sparse_coo.shape,#note: definitely not [1:], I've checked.
     )
