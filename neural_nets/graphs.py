@@ -19,9 +19,9 @@ class GATLayer(MessagePassing):
 
         # Attention mechanism parameters
         # one parameter per head and out_channel
-        self.att_targ = nn.Parameter(torch.Tensor(1, heads, out_channels, dtype=dtype))
+        self.att_targ = nn.Parameter(torch.ones(1, heads, out_channels, dtype=dtype))
         self.att_source = nn.Parameter(
-            torch.Tensor(1, heads, out_channels, dtype=dtype)
+            torch.ones(1, heads, out_channels, dtype=dtype)
         )
         # att_targ - parameters of attention for target nodes (to which pass)
         # att_source - parameters of attention for source nodes (from which pass)
@@ -30,7 +30,7 @@ class GATLayer(MessagePassing):
         # (the aggregated messages are passed forward with `propagate` function consisting of - `message`, `aggregate` and `update`)
 
         # Optional bias
-        self.bias = nn.Parameter(torch.Tensor(out_channels, dtype=dtype))
+        self.bias = nn.Parameter(torch.zeros(out_channels, dtype=dtype))
         self.reset_parameters()
         # ^note: # could be made nn.Linear but less efficient.
 

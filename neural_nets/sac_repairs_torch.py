@@ -1,23 +1,22 @@
 import copy
 import time
 
-from examples.box_to_pos_task import MoveBoxSetup
-from genesis import gs
-from torchsparse_util import sparse_coo_to_torchsparse
+import tensordict
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torchrl.data.replay_buffers import TensorDictReplayBuffer, TensorStorage
-from torchrl.data.replay_buffers.samplers import PrioritizedSampler
-from torch_geometric.data import Batch
-from graphs import GraphEncoder
-import torchsparse.nn as tsnn
 import torchsparse
+import torchsparse.nn as tsnn
+from genesis import gs
+from graphs import GraphEncoder
 from n_step_sampler import StepAndNextSampler
-
-from sparse_voxel_buffer import SparseVoxelBuffer
-import tensordict
 from singleton_graph_buffer import GraphBuffer
+from sparse_voxel_buffer import SparseVoxelBuffer
+from torch_geometric.data import Batch
+from torchrl.data.replay_buffers import TensorDictReplayBuffer, TensorStorage
+from torchsparse_util import sparse_coo_to_torchsparse
+
+from examples.box_to_pos_task import MoveBoxSetup
 
 
 class SACActor(nn.Module):
@@ -25,7 +24,13 @@ class SACActor(nn.Module):
     PyTorch implementation of SAC Actor network.
     """
 
-    def __init__(self, action_dim, electronics_graph_encoded_dim, device=None):
+    def __init__(
+        self,
+        action_dim,
+        electronics_graph_encoded_dim,
+        device=None,
+        dtype=torch.bfloat16,
+    ):
         super(SACActor, self).__init__()
         self.device = device or torch.device(
             "cuda" if torch.cuda.is_available() else "cpu"
@@ -42,40 +47,48 @@ class SACActor(nn.Module):
         self.video1_conv1 = nn.Conv2d(
             7, 10, kernel_size=(6, 6), stride=(4, 4), dtype=torch.bfloat16
         )
-        self.vid1_bn1 = nn.BatchNorm2d(10)
+        self.vid1_bn1 = nn.BatchNorm2d(10, dtype=torch.bfloat16)
         self.video1_conv2 = nn.Conv2d(
             10, 12, kernel_size=(6, 6), stride=(3, 3), dtype=torch.bfloat16
         )
-        self.vid1_bn2 = nn.BatchNorm2d(12)
+        self.vid1_bn2 = nn.BatchNorm2d(12, dtype=torch.bfloat16)
         self.video1_conv3 = nn.Conv2d(
             12, 14, kernel_size=(6, 6), stride=(3, 3), dtype=torch.bfloat16
         )
-        self.vid1_bn3 = nn.BatchNorm2d(14)
+        self.vid1_bn3 = nn.BatchNorm2d(14, dtype=torch.bfloat16)
 
         self.video2_conv1 = nn.Conv2d(
             7, 10, kernel_size=(6, 6), stride=(4, 4), dtype=torch.bfloat16
         )
-        self.vid2_bn1 = nn.BatchNorm2d(10)
+        self.vid2_bn1 = nn.BatchNorm2d(10, dtype=torch.bfloat16)
         self.video2_conv2 = nn.Conv2d(
             10, 12, kernel_size=(6, 6), stride=(3, 3), dtype=torch.bfloat16
         )
-        self.vid2_bn2 = nn.BatchNorm2d(12)
+        self.vid2_bn2 = nn.BatchNorm2d(12, dtype=torch.bfloat16)
         self.video2_conv3 = nn.Conv2d(
             12, 14, kernel_size=(6, 6), stride=(3, 3), dtype=torch.bfloat16
         )
-        self.vid2_bn3 = nn.BatchNorm2d(14)
-        # Graph observations MLP
-        combined_dim = 216 * 2 + 350 * 2 + electronics_graph_encoded_dim * 2
-        self.combine_bn1 = nn.BatchNorm1d(combined_dim)
-        self.fc1 = nn.Linear(combined_dim, 256)
-        self.combine_bn2 = nn.BatchNorm1d(256)
-        self.fc2 = nn.Linear(256, 256)
-        self.combine_bn3 = nn.BatchNorm1d(256)
-        self.out_mean = nn.Linear(256, action_dim)
-        self.out_log_std = nn.Linear(256, action_dim)
+        self.vid2_bn3 = nn.BatchNorm2d(14, dtype=torch.bfloat16)
+
+        # graph
         self.graph_encoder = GraphEncoder(
-            4, 256, electronics_graph_encoded_dim, heads=2
+            4, 256, electronics_graph_encoded_dim, heads=2, dtype=torch.bfloat16
         )
+        # combined
+        compressed_video_shape = 350
+        compressed_voxel_shape = 216
+        combined_dim = (
+            compressed_video_shape * 2
+            + compressed_voxel_shape * 2
+            + electronics_graph_encoded_dim * 2
+        )
+        self.combine_bn1 = nn.BatchNorm1d(combined_dim, dtype=torch.bfloat16)
+        self.fc1 = nn.Linear(combined_dim, 256, dtype=torch.bfloat16)
+        self.combine_bn2 = nn.BatchNorm1d(256, dtype=torch.bfloat16)
+        self.fc2 = nn.Linear(256, 256, dtype=torch.bfloat16)
+        self.combine_bn3 = nn.BatchNorm1d(256, dtype=torch.bfloat16)
+        self.out_mean = nn.Linear(256, action_dim, dtype=torch.bfloat16)
+        self.out_log_std = nn.Linear(256, action_dim, dtype=torch.bfloat16)
 
     def forward(
         self,
@@ -98,7 +111,7 @@ class SACActor(nn.Module):
         x_vox_i = self.voxel_act(x_vox_i)
         x_vox_i = self.voxel_bn3(x_vox_i)
         x_v_dense = x_vox_i.dense()
-        x_vox_i = x_v_dense.view(x_v_dense.size(0), -1)
+        x_vox_i = x_v_dense.view(x_v_dense.size(0), -1).to(torch.bfloat16)
         # desired voxels
         x_vox_d = self.voxel_conv1(voxel_des_obs)
         x_vox_d = self.voxel_act(x_vox_d)
@@ -110,7 +123,7 @@ class SACActor(nn.Module):
         x_vox_d = self.voxel_act(x_vox_d)
         x_vox_d = self.voxel_bn3(x_vox_d)
         x_v_dense = x_vox_d.dense()
-        x_vox_d = x_v_dense.view(x_v_dense.size(0), -1)
+        x_vox_d = x_v_dense.view(x_v_dense.size(0), -1).to(torch.bfloat16)
 
         # assume video_obs shape [B, C, H, W]
         vid_1 = video_obs[:, 0]
@@ -142,7 +155,7 @@ class SACActor(nn.Module):
         # concatenate all features
         x = torch.cat(
             [x_vox_i, x_vox_d, x_vid1, x_vid2, encoded_graph_i, encoded_graph_d], dim=-1
-        )
+        ).to(torch.bfloat16)
         x = self.combine_bn1(x)
         x = F.silu(self.fc1(x))
         x = self.combine_bn2(x)
@@ -180,7 +193,7 @@ class SACActor(nn.Module):
         log_prob = log_prob.sum(dim=-1, keepdim=True) - torch.log(
             1 - action.pow(2) + 1e-6
         ).sum(dim=-1, keepdim=True)
-        return action, log_prob
+        return action.to(torch.bfloat16), log_prob.to(torch.bfloat16)
 
 
 class SACCritic(nn.Module):
@@ -207,33 +220,44 @@ class SACCritic(nn.Module):
         )  # note: they are float16 by default. Could set to tf32 for better performance. bfloat16 is not supported.
         # Given input shape (D0, H0, W0) = (256, 256, 256) and 3 Conv3d layers each with kernel_size=6, stride=4:
         # Layer 1: D1 = floor((256 - 6) / 4) + 1 = 63,  same for H1, W1
-        # Layer 2: D2 = floor((63 - 6) / 4) + 1 = 15,   same for H2, W2
-        # Layer 3: D3 = floor((15 - 6) / 4) + 1 = 3,    same for H3, W3
+        # Layer 2: D2 = floor((63 - 6) / 3) + 1 = 15,   same for H2, W2
+        # Layer 3: D3 = floor((15 - 6) / 3) + 1 = 3,    same for H3, W3
         # Output channels after last Conv3d = 8
         # Total flattened output dim = 8 * 3 * 3 * 3 = 216
         self.vid1_q1 = nn.Sequential(
-            nn.Conv2d(7, 8, kernel_size=(6, 6), stride=(4, 4), dtype=torch.bfloat16),
-            nn.BatchNorm2d(8, dtype=torch.bfloat16),
+            nn.Conv2d(7, 10, kernel_size=(6, 6), stride=(4, 4), dtype=torch.bfloat16),
+            nn.BatchNorm2d(10, dtype=torch.bfloat16),
             nn.SiLU(),
-            nn.Conv2d(8, 12, kernel_size=(6, 6), stride=(4, 4), dtype=torch.bfloat16),
+            nn.Conv2d(10, 12, kernel_size=(6, 6), stride=(3, 3), dtype=torch.bfloat16),
             nn.BatchNorm2d(12, dtype=torch.bfloat16),
             nn.SiLU(),
-            nn.Conv2d(12, 12, kernel_size=(6, 6), stride=(4, 4), dtype=torch.bfloat16),
-            nn.BatchNorm2d(12, dtype=torch.bfloat16),
+            nn.Conv2d(12, 14, kernel_size=(6, 6), stride=(3, 3), dtype=torch.bfloat16),
+            nn.BatchNorm2d(14, dtype=torch.bfloat16),
             nn.SiLU(),
-        )
+        )  # note: BBF (bigger better faster, 2023) used impala-style convs, which have 15 conv layers and are better for video.
+        # it's more sample-efficient, although notably more expensive.
+        # perhaps consider using the impala-style convs.
+        # though there is no evidence of this improving anything, as BRO paper said.
+        # Simba/simba2 did not use vision at all.
         self.vid2_q1 = nn.Sequential(
-            nn.Conv2d(7, 8, kernel_size=(6, 6), stride=(4, 4), dtype=torch.bfloat16),
-            nn.BatchNorm2d(8, dtype=torch.bfloat16),
+            nn.Conv2d(7, 10, kernel_size=(6, 6), stride=(4, 4), dtype=torch.bfloat16),
+            nn.BatchNorm2d(10, dtype=torch.bfloat16),
             nn.SiLU(),
-            nn.Conv2d(8, 12, kernel_size=(6, 6), stride=(4, 4), dtype=torch.bfloat16),
+            nn.Conv2d(10, 12, kernel_size=(6, 6), stride=(3, 3), dtype=torch.bfloat16),
             nn.BatchNorm2d(12, dtype=torch.bfloat16),
             nn.SiLU(),
-            nn.Conv2d(12, 12, kernel_size=(6, 6), stride=(4, 4), dtype=torch.bfloat16),
-            nn.BatchNorm2d(12, dtype=torch.bfloat16),
+            nn.Conv2d(12, 14, kernel_size=(6, 6), stride=(3, 3), dtype=torch.bfloat16),
+            nn.BatchNorm2d(14, dtype=torch.bfloat16),
             nn.SiLU(),
         )
-        combined_q_dim = 216 * 2 + 324 * 2 + electronics_graph_out_dim * 2 + action_dim
+        compressed_video_shape = 350  # 300 # I don't know why - there is a mismatch between actor and critic on this value.
+        compressed_voxel_shape = 216
+        combined_q_dim = (
+            compressed_video_shape * 2
+            + compressed_voxel_shape * 2
+            + electronics_graph_out_dim * 2
+            + action_dim
+        )
         self.q1_fc = nn.Sequential(
             nn.Linear(combined_q_dim, 256, dtype=torch.bfloat16),
             nn.BatchNorm1d(256, dtype=torch.bfloat16),
@@ -260,25 +284,25 @@ class SACCritic(nn.Module):
             tsnn.SiLU(),
         )
         self.vid1_q2 = nn.Sequential(  # 7 channels!
-            nn.Conv2d(7, 8, kernel_size=(6, 6), stride=(4, 4), dtype=torch.bfloat16),
-            nn.BatchNorm2d(8, dtype=torch.bfloat16),
+            nn.Conv2d(7, 10, kernel_size=(6, 6), stride=(4, 4), dtype=torch.bfloat16),
+            nn.BatchNorm2d(10, dtype=torch.bfloat16),
             nn.SiLU(),
-            nn.Conv2d(8, 12, kernel_size=(6, 6), stride=(4, 4), dtype=torch.bfloat16),
+            nn.Conv2d(10, 12, kernel_size=(6, 6), stride=(3, 3), dtype=torch.bfloat16),
             nn.BatchNorm2d(12, dtype=torch.bfloat16),
             nn.SiLU(),
-            nn.Conv2d(12, 12, kernel_size=(6, 6), stride=(4, 4), dtype=torch.bfloat16),
-            nn.BatchNorm2d(12, dtype=torch.bfloat16),
+            nn.Conv2d(12, 14, kernel_size=(6, 6), stride=(3, 3), dtype=torch.bfloat16),
+            nn.BatchNorm2d(14, dtype=torch.bfloat16),
             nn.SiLU(),
         )
         self.vid2_q2 = nn.Sequential(  # 7 channels!
-            nn.Conv2d(7, 8, kernel_size=(6, 6), stride=(4, 4), dtype=torch.bfloat16),
-            nn.BatchNorm2d(8, dtype=torch.bfloat16),
+            nn.Conv2d(7, 10, kernel_size=(6, 6), stride=(4, 4), dtype=torch.bfloat16),
+            nn.BatchNorm2d(10, dtype=torch.bfloat16),
             nn.SiLU(),
-            nn.Conv2d(8, 12, kernel_size=(6, 6), stride=(4, 4), dtype=torch.bfloat16),
+            nn.Conv2d(10, 12, kernel_size=(6, 6), stride=(3, 3), dtype=torch.bfloat16),
             nn.BatchNorm2d(12, dtype=torch.bfloat16),
             nn.SiLU(),
-            nn.Conv2d(12, 12, kernel_size=(6, 6), stride=(4, 4), dtype=torch.bfloat16),
-            nn.BatchNorm2d(12, dtype=torch.bfloat16),
+            nn.Conv2d(12, 14, kernel_size=(6, 6), stride=(3, 3), dtype=torch.bfloat16),
+            nn.BatchNorm2d(14, dtype=torch.bfloat16),
             nn.SiLU(),
         )
         self.q2_fc = nn.Sequential(
@@ -350,11 +374,9 @@ class SACCritic(nn.Module):
         )
         # vid
         x_vid1_q2 = self.vid1_q2(video_obs[:, 0])
-        x_vid1_q2_dense = x_vid1_q2.dense()
-        x_vid1_q2 = x_vid1_q2_dense.view(x_vid1_q2_dense.size(0), -1).to(torch.bfloat16)
+        x_vid1_q2 = x_vid1_q2.view(x_vid1_q2.size(0), -1).to(torch.bfloat16)
         x_vid2_q2 = self.vid2_q2(video_obs[:, 1])
-        x_vid2_q2_dense = x_vid2_q2.dense()
-        x_vid2_q2 = x_vid2_q2_dense.view(x_vid2_q2_dense.size(0), -1).to(torch.bfloat16)
+        x_vid2_q2 = x_vid2_q2.view(x_vid2_q2.size(0), -1).to(torch.bfloat16)
         # graph
         graph_init_q2 = self.graph_encoder_q2(graph_init_obs)
         graph_des_q2 = self.graph_encoder_q2(graph_des_obs)
@@ -429,8 +451,8 @@ class SACTrainer:
                 "video_obs": torch.zeros(
                     (buffer_size, 2, 7, 256, 256), dtype=torch.uint8
                 ),  # Example shape, adjust as needed
-                "reward": torch.zeros((buffer_size,), dtype=torch.float32),
-                "action": torch.zeros((buffer_size, action_dim), dtype=torch.float32),
+                "reward": torch.zeros((buffer_size,), dtype=torch.bfloat16),
+                "action": torch.zeros((buffer_size, action_dim), dtype=torch.bfloat16),
                 "done": torch.zeros((buffer_size,), dtype=torch.bool),
             },
             batch_size=(buffer_size,),
@@ -489,15 +511,19 @@ class SACTrainer:
         return action.cpu()
 
     def update(self, vox_init, vox_des, vid_obs, g_init, g_des, a, r, next_vid, d):
+
         with torch.no_grad():
             na, nlp = self.actor.sample_action(
                 vox_init, vox_des, next_vid, g_des, g_des
             )
             q1n, q2n = self.critic_target(vox_init, vox_des, vid_obs, g_init, g_des, na)
             qn = torch.min(q1n, q2n) - self.log_alpha.exp() * nlp
-            target = r.unsqueeze(-1) + self.gamma * (1 - d.unsqueeze(-1)) * qn
+            target = (
+                r.unsqueeze(-1)
+                + self.gamma * (1 - d.unsqueeze(-1).to(torch.bfloat16)) * qn
+            ).to(torch.bfloat16)
         q1, q2 = self.critic(vox_init, vox_des, vid_obs, g_init, g_des, a)
-        cl = F.mse_loss(q1, target) + F.mse_loss(q2, target)
+        cl = (F.mse_loss(q1, target) + F.mse_loss(q2, target)).to(torch.bfloat16)
         self.critic_optimizer.zero_grad()
         cl.backward()
         self.critic_optimizer.step()
@@ -560,8 +586,8 @@ class SACTrainer:
                     "video_obs": video_obs,
                     "init_electronics_graph_id": self.init_graph_ids,
                     "des_electronics_graph_id": self.des_graph_ids,
-                    "action": action,
-                    "reward": rewards,
+                    "action": action.to(torch.bfloat16),
+                    "reward": rewards.to(torch.bfloat16),
                     "done": done,
                 },
                 batch_size=(done.size()[0],),
@@ -606,9 +632,10 @@ class SACTrainer:
         self, init_graph_ids: torch.Tensor, des_graph_ids: torch.Tensor
     ) -> tuple[Batch, Batch]:
         """Retrieve electronics graph tensors from the singleton buffer for a batch."""
-        # Get unique graph IDs in this batch
-        init_graph_ids = torch.cat([init_graph_ids, des_graph_ids]).unique()
-
+        assert init_graph_ids.shape == des_graph_ids.shape, "Batch sizes must match"
+        assert torch.isin(init_graph_ids, des_graph_ids, invert=True).all(), (
+            "Desired and initial graph IDs must never match"
+        )
         return self.graph_buffer.get(init_graph_ids), self.graph_buffer.get(
             des_graph_ids
         )
@@ -665,8 +692,8 @@ def run_training(
     )  # all true to write into buffers.
     trainer._add_to_buffer(
         video_obs,
-        torch.zeros((ml_batch_dim, action_dim), dtype=torch.float32),
-        torch.zeros((ml_batch_dim,), dtype=torch.float32),
+        torch.zeros((ml_batch_dim, action_dim), dtype=torch.bfloat16),
+        torch.zeros((ml_batch_dim,), dtype=torch.bfloat16),
         graph_init_obs,
         graph_des_obs,
         done,
@@ -684,7 +711,9 @@ def run_training(
     # Prefill replay buffer with random actions
     for _ in range(prefill_steps):
         rand_action = (
-            torch.rand((ml_batch_dim, action_dim), device=trainer.device)
+            torch.rand(
+                (ml_batch_dim, action_dim), device=trainer.device, dtype=torch.bfloat16
+            )
             * (action_bound_max - action_bound_min)
             + action_bound_min
         )
@@ -790,10 +819,6 @@ def run_training(
 
         if step % 1000 == 0:
             print(f"Step {step}: critic_loss={cl}, actor_loss={al}, alpha={alpha}")
-            print(
-                f"Buffer: {len(trainer.replay_buffer)} transitions, "
-                f"{len(trainer.voxel_buffer)} unique voxels"
-            )
 
         # Update observations
         prev_video_obs = video_obs  # only prev_video_obs is stored
@@ -805,7 +830,7 @@ if __name__ == "__main__":
     from repairs_components.processing.tasks import AssembleTask, DisassembleTask
 
     # Initialize Genesis
-    gs.init(backend=gs.cuda)
+    gs.init(backend=gs.cuda, logging_level="warning") #note: logging level "warning" because genesis spams step speed logs during training.
 
     # Create task and environment setup
     tasks = [AssembleTask(), DisassembleTask()]
