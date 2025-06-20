@@ -422,6 +422,15 @@ class SACTrainer:
         self.critic = SACCritic(action_dim, electronics_graph_encoded_dim).to(
             self.device
         )
+        # Try to speed-up networks with torch.compile (PyTorch ≥ 2.0). If it
+        # fails (e.g., unsupported ops), fall back to eager modules.
+        try:
+            self.actor = torch.compile(self.actor, mode="default")
+            self.critic = torch.compile(self.critic, mode="default")
+        except Exception as err:
+            print(
+                f"[SACTrainer] torch.compile failed: {err}. Falling back to eager execution."
+            )
         self.critic_target = copy.deepcopy(self.critic)
         self.log_alpha = torch.zeros(1, requires_grad=True, device=self.device)
         self.target_entropy = -action_dim
@@ -511,7 +520,6 @@ class SACTrainer:
         return action.cpu()
 
     def update(self, vox_init, vox_des, vid_obs, g_init, g_des, a, r, next_vid, d):
-
         with torch.no_grad():
             na, nlp = self.actor.sample_action(
                 vox_init, vox_des, next_vid, g_des, g_des
@@ -830,7 +838,9 @@ if __name__ == "__main__":
     from repairs_components.processing.tasks import AssembleTask, DisassembleTask
 
     # Initialize Genesis
-    gs.init(backend=gs.cuda, logging_level="warning") #note: logging level "warning" because genesis spams step speed logs during training.
+    gs.init(
+        backend=gs.cuda, logging_level="warning"
+    )  # note: logging level "warning" because genesis spams step speed logs during training.
 
     # Create task and environment setup
     tasks = [AssembleTask(), DisassembleTask()]

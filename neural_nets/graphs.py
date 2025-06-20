@@ -20,9 +20,7 @@ class GATLayer(MessagePassing):
         # Attention mechanism parameters
         # one parameter per head and out_channel
         self.att_targ = nn.Parameter(torch.ones(1, heads, out_channels, dtype=dtype))
-        self.att_source = nn.Parameter(
-            torch.ones(1, heads, out_channels, dtype=dtype)
-        )
+        self.att_source = nn.Parameter(torch.ones(1, heads, out_channels, dtype=dtype))
         # att_targ - parameters of attention for target nodes (to which pass)
         # att_source - parameters of attention for source nodes (from which pass)
         # to compute attention in GAT they are multiplied with messages and summed; and softmax is applied.
@@ -122,7 +120,7 @@ class GraphEncoder(nn.Module):
         self.gat = GAT(num_features, hidden_dim, out_dim, heads=heads, dtype=dtype)
         # Gating network that outputs a scalar gate for every node.
         self.gate = nn.Linear(out_dim, 1, dtype=dtype)
-        self.dtype=dtype
+        self.dtype = dtype
 
     def forward(self, batch: Batch):
         """Return a gated, graph-level embedding.
@@ -145,7 +143,7 @@ class GraphEncoder(nn.Module):
             pooled = torch.zeros(
                 (num_graphs, gated_emb.size(-1)),
                 device=gated_emb.device,
-                dtype=self.dtype
+                dtype=self.dtype,
             )
             norm = torch.ones(
                 (num_graphs, 1), device=gated_emb.device, dtype=self.dtype

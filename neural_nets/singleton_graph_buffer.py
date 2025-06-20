@@ -38,11 +38,13 @@ class GraphBuffer:
         # Dense storage -----------------------------------------------------
         self._edge_index = torch.full(
             (buffer_size, 2, max_edges), -1, dtype=torch.long, device=self.device
-        )#ideally shorten this to int8.
+        )  # ideally shorten this to int8.
         self._node_feat: Optional[torch.Tensor] = None
         if node_feat_dim is not None:
             self._node_feat = torch.zeros(
-                (buffer_size, max_nodes, node_feat_dim), device=self.device, dtype=values_dtype
+                (buffer_size, max_nodes, node_feat_dim),
+                device=self.device,
+                dtype=values_dtype,
             )
 
         self._num_nodes = torch.zeros(buffer_size, dtype=torch.long, device=self.device)
