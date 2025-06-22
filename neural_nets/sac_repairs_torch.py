@@ -679,6 +679,7 @@ def run_training(
         obs_cfg=obs_cfg,
         reward_cfg=reward_cfg,
         command_cfg=command_cfg,
+        io_cfg=io_cfg,
     )
     trainer = SACTrainer(
         action_dim,
@@ -873,13 +874,30 @@ if __name__ == "__main__":
             "finger_joint1": 0.04,
             "finger_joint2": 0.04,
         },
+        "min_bounds": (-0.6, -0.7, -0.1),
+        "max_bounds": (0.5, 0.5, 2),
+    }
+
+    obs_cfg = {
+        "num_obs": 3,  # RGB, depth, segmentation
+        "res": (256, 256),
+        "use_random_textures": False,
+    }
+
+    reward_cfg = {
+        "success_reward": 10.0,
+        "progress_reward_scale": 1.0,
+        "progressive": True,  # TODO : if progressive, use progressive reward calc instead.
+    }
+
+    io_cfg = {
+        "generate_number_of_configs_per_scene": 256,
         "dataloader_settings": {
             "prefetch_memory_size": 256
             if not debug
             else 4  # 256 environments per scene.
         },  # note^ 4 is for faster env spinup.
-        "min_bounds": (-0.6, -0.7, -0.1),
-        "max_bounds": (0.5, 0.5, 2),
+        "data_dir": "/workspace/data",
         "save_obs": {
             # "video": True,
             # "voxel": True,
@@ -889,19 +907,8 @@ if __name__ == "__main__":
             "voxel": False,
             "electronic_graph": False,
             "mechanics_graph": False,
-            "path": "./obs/",
+            "path": "/workspace/data/obs/",
         },
-    }
-
-    obs_cfg = {
-        "num_obs": 3,  # RGB, depth, segmentation
-        "res": (256, 256),
-    }
-
-    reward_cfg = {
-        "success_reward": 10.0,
-        "progress_reward_scale": 1.0,
-        "progressive": True,  # TODO : if progressive, use progressive reward calc instead.
     }
 
     command_cfg = {
