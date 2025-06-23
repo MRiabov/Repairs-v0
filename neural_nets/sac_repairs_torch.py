@@ -848,6 +848,7 @@ if __name__ == "__main__":
     env_setups = [MoveBoxSetup()]
 
     debug = True
+    force_recreate_data = True
 
     # Environment configuration
     env_cfg = {
@@ -909,6 +910,7 @@ if __name__ == "__main__":
             "mechanics_graph": False,
             "path": "/workspace/data/obs/",
         },
+        "force_recreate_data": force_recreate_data,
     }
 
     command_cfg = {
