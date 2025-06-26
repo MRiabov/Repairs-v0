@@ -27,3 +27,7 @@ instance
 *.mp4
 obs
 *.pt
+#filter out meshes (they will go in a separate dataset)
+*.bin
+*.gltf
+*.glb

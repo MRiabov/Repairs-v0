@@ -5,11 +5,15 @@
         
         
 
+        
+        
+        
+
         {
             "name": "Run SAC repairs",
             "type": "debugpy",
             "request": "launch",
-            "program": "${workspaceFolder}/neural_nets/sac_repairs.py",
+            "program": "${workspaceFolder}/neural_nets/sac_repairs_torch.py",
             "console": "integratedTerminal",
             "justMyCode": true,
             "cwd": "${workspaceFolder}",

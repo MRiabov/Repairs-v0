@@ -881,7 +881,7 @@ if __name__ == "__main__":
 
     obs_cfg = {
         "num_obs": 3,  # RGB, depth, segmentation
-        "res": (256, 256),
+        "res": (256, 256) if not debug else (64, 64),
         "use_random_textures": False,
     }
 
@@ -892,7 +892,7 @@ if __name__ == "__main__":
     }
 
     io_cfg = {
-        "generate_number_of_configs_per_scene": 256,
+        "generate_number_of_configs_per_scene": 256 if not debug else 8,
         "dataloader_settings": {
             "prefetch_memory_size": 256
             if not debug
@@ -911,6 +911,7 @@ if __name__ == "__main__":
             "path": "/workspace/data/obs/",
         },
         "force_recreate_data": force_recreate_data,
+        "env_setup_ids": list(range(1)),  # 1 scene now.
     }
 
     command_cfg = {
