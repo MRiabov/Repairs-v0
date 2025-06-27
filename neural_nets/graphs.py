@@ -5,7 +5,7 @@ from torch_geometric.data import Batch, Data
 from torch_geometric.nn import MessagePassing
 from torch_geometric.transforms.normalize_features import NormalizeFeatures
 from torch_geometric.utils import add_self_loops, softmax
-from torch_scatter import scatter_add
+from torch_scatter import scatter_add, scatter_mean
 
 
 class GATLayer(MessagePassing):
@@ -102,7 +102,12 @@ class GraphEncoder(nn.Module):
     """
 
     def __init__(
-        self, num_features, hidden_dim, out_dim, heads: int, dtype=torch.bfloat16
+        self,
+        num_features,
+        hidden_dim,
+        out_dim,
+        heads: int,
+        dtype=torch.bfloat16,
     ):
         """Parameters
         ----------
@@ -156,3 +161,65 @@ class GraphEncoder(nn.Module):
         graph_emb = pooled / norm
 
         return graph_emb.squeeze(0)
+
+
+class GraphEncoderWithGlobalFeatures(GraphEncoder):
+    def __init__(
+        self,
+        num_features_graph,
+        hidden_dim_graph,
+        out_dim_graph,
+        global_embedding_in_dim,
+        hidden_dim_global,
+        out_dim_global,
+        heads: int,
+        dtype=torch.bfloat16,
+    ):
+        super(GraphEncoderWithGlobalFeatures, self).__init__(
+            num_features_graph,
+            hidden_dim_graph,
+            out_dim_graph,
+            heads=heads,
+            dtype=dtype,
+        )
+        self.graph_encoder = GraphEncoder(
+            num_features_graph,
+            hidden_dim_graph,
+            out_dim_graph,
+            heads=heads,
+            dtype=dtype,
+        )
+        self.global_feat_encoder = SparseGlobalFeaturesEncoder(
+            global_embedding_in_dim, hidden_dim_global, out_dim_global, dtype=dtype
+        )
+        self.global_bn1 = nn.BatchNorm1d(out_dim_graph + out_dim_global, dtype=dtype)
+        self.global_out_lin = nn.Linear(out_dim_global, out_dim_global, dtype=dtype)
+
+    def forward(self, data: Batch):
+        graph_emb = self.graph_encoder(data)
+        global_emb = self.global_feat_encoder(data.global_feat, data.batch)
+        global_emb = torch.cat([graph_emb, global_emb], dim=1)
+        global_emb = F.relu(global_emb)
+        global_emb = self.global_bn1(global_emb)
+        global_emb = self.global_out_lin(global_emb)
+        return global_emb
+
+
+class SparseGlobalFeaturesEncoder(nn.Module):
+    def __init__(self, in_feat, hidden_dim, out_dim, aggr="sum", dtype=torch.bfloat16):
+        super(SparseGlobalFeaturesEncoder, self).__init__()
+        self.fc1 = nn.Linear(in_feat, hidden_dim, dtype=dtype)
+        self.bn1 = nn.BatchNorm1d(hidden_dim, dtype=dtype)
+        self.fc2 = nn.Linear(hidden_dim, out_dim, dtype=dtype)
+        self.bn2 = nn.BatchNorm1d(out_dim, dtype=dtype)
+        self.aggr = aggr
+
+    def forward(self, x, batch):
+        x = self.fc1(x)
+        x = self.bn1(x)
+        x = F.relu(x)
+        x = self.fc2(x)
+        x = self.bn2(x)
+        x = scatter_mean(x, batch, dim=0, dim_size=batch.num_graphs)
+        # ^mean normalises the graph-level embeddings
+        return x  # returns a batch of graph-level embeddings

@@ -8,12 +8,16 @@ import torch.nn.functional as F
 import torchsparse
 import torchsparse.nn as tsnn
 from genesis import gs
-from graphs import GraphEncoder
+from graphs import GraphEncoder, GraphEncoderWithGlobalFeatures
 from n_step_sampler import StepAndNextSampler
 from singleton_graph_buffer import GraphBuffer
 from sparse_voxel_buffer import SparseVoxelBuffer
 from torch_geometric.data import Batch
-from torchrl.data.replay_buffers import TensorDictReplayBuffer, TensorStorage
+from torchrl.data.replay_buffers import (
+    LazyMemmapStorage,
+    TensorDictReplayBuffer,
+    TensorStorage,
+)
 from torchsparse_util import sparse_coo_to_torchsparse
 
 from examples.box_to_pos_task import MoveBoxSetup
@@ -267,8 +271,15 @@ class SACCritic(nn.Module):
             nn.SiLU(),
             nn.Linear(256, 1, dtype=torch.bfloat16),
         )
-        self.graph_encoder_q1 = GraphEncoder(
-            4, 256, electronics_graph_out_dim, heads=2, dtype=torch.bfloat16
+        self.graph_encoder_q1 = GraphEncoderWithGlobalFeatures(
+            num_features_graph=4,
+            hidden_dim_graph=256,
+            out_dim_graph=electronics_graph_out_dim,
+            global_embedding_in_dim=4,
+            hidden_dim_global=256,
+            out_dim_global=electronics_graph_out_dim,
+            heads=2,
+            dtype=torch.bfloat16,
         )
 
         # Twin Q2
@@ -314,8 +325,15 @@ class SACCritic(nn.Module):
             nn.SiLU(),
             nn.Linear(256, 1, dtype=torch.bfloat16),
         )
-        self.graph_encoder_q2 = GraphEncoder(
-            216, 256, electronics_graph_out_dim, heads=2, dtype=torch.bfloat16
+        self.graph_encoder_q2 = GraphEncoderWithGlobalFeatures(
+            216,
+            256,
+            electronics_graph_out_dim,
+            global_embedding_in_dim=4,
+            hidden_dim_global=256,
+            out_dim_global=electronics_graph_out_dim,
+            heads=2,
+            dtype=torch.bfloat16,
         )
 
     def forward(
@@ -445,37 +463,41 @@ class SACTrainer:
         self.alpha_optimizer = torch.optim.Adam([self.log_alpha], lr=alpha_lr)
 
         # Replay buffer setup
-        tensor_dict = tensordict.TensorDict(
-            {
-                "init_voxel_id": torch.zeros(
-                    (buffer_size,), dtype=torch.int
-                ),  # Stores voxel IDs instead of full tensors
-                "des_voxel_id": torch.zeros((buffer_size,), dtype=torch.int),
-                "init_electronics_graph_id": torch.zeros(
-                    (buffer_size,), dtype=torch.int
-                ),
-                "des_electronics_graph_id": torch.zeros(
-                    (buffer_size,), dtype=torch.int
-                ),
-                "video_obs": torch.zeros(
-                    (buffer_size, 2, 7, 256, 256), dtype=torch.uint8
-                ),  # Example shape, adjust as needed
-                "reward": torch.zeros((buffer_size,), dtype=torch.bfloat16),
-                "action": torch.zeros((buffer_size, action_dim), dtype=torch.bfloat16),
-                "done": torch.zeros((buffer_size,), dtype=torch.bool),
-            },
-            batch_size=(buffer_size,),
-            device=self.device,
-        )
+        # tensor_dict = tensordict.TensorDict(
+        #     {
+        #         "init_voxel_id": torch.zeros(
+        #             (buffer_size,), dtype=torch.int
+        #         ),  # Stores voxel IDs instead of full tensors
+        #         "des_voxel_id": torch.zeros((buffer_size,), dtype=torch.int),
+        #         "init_electronics_graph_id": torch.zeros(
+        #             (buffer_size,), dtype=torch.int
+        #         ),
+        #         "des_electronics_graph_id": torch.zeros(
+        #             (buffer_size,), dtype=torch.int
+        #         ),
+        #         "video_obs": torch.zeros(
+        #             (buffer_size, 2, 7, 256, 256), dtype=torch.uint8
+        #         ),  # Example shape, adjust as needed
+        #         "reward": torch.zeros((buffer_size,), dtype=torch.bfloat16),
+        #         "action": torch.zeros((buffer_size, action_dim), dtype=torch.bfloat16),
+        #         "done": torch.zeros((buffer_size,), dtype=torch.bool),
+        #     },
+        #     batch_size=(buffer_size,),  # batch size= buffer size???
+        #     device=self.device,
+        # )
 
-        self.buffer_storage = TensorStorage(
-            storage=tensor_dict, max_size=buffer_size, device=self.device
-        )
+        self.buffer_storage = LazyMemmapStorage(
+            max_size=buffer_size
+        )  # device=self.device,  # storage=tensor_dict,
+
         self.replay_buffer = TensorDictReplayBuffer(
             storage=self.buffer_storage,
             batch_size=batch_size,
             sampler=StepAndNextSampler(n=1, gamma=0.99, batch_size=sample_batch_size),
-        )
+        )  # FIXME: I should store this buffer in the ROM and prefetch it to GPU only due to video obs being large.
+
+        self.replay_buffer.append_transform(lambda x: x.to(self.device))
+        # ^ or at least video_obs.
         # Singleton storages
         # Sparse voxel & graph storage
         self.voxel_buffer = SparseVoxelBuffer(
@@ -847,8 +869,8 @@ if __name__ == "__main__":
     tasks = [AssembleTask(), DisassembleTask()]
     env_setups = [MoveBoxSetup()]
 
-    debug = True
-    force_recreate_data = True
+    debug = False  # True
+    force_recreate_data = False  # True
 
     # Environment configuration
     env_cfg = {
@@ -892,9 +914,11 @@ if __name__ == "__main__":
     }
 
     io_cfg = {
-        "generate_number_of_configs_per_scene": 256 if not debug else 8,
+        "generate_number_of_configs_per_scene": 164
+        if not debug
+        else 8,  # note: strange shape to debug
         "dataloader_settings": {
-            "prefetch_memory_size": 256
+            "prefetch_memory_size": 512
             if not debug
             else 4  # 256 environments per scene.
         },  # note^ 4 is for faster env spinup.
