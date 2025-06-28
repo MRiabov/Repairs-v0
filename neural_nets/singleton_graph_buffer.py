@@ -56,10 +56,9 @@ class GraphBuffer:
     # ------------------------------------------------------------------
     def _allocate_rows(self, count: int) -> torch.Tensor:
         free = torch.nonzero(~self._used_mask, as_tuple=False).flatten()
-        if free.numel() < count:
-            raise RuntimeError(
-                f"GraphBuffer full: need {count} free slots, have {free.numel()}"
-            )
+        assert free.numel() >= count, (
+            f"GraphBuffer full: need {count} free slots, have {free.numel()}"
+        )
         rows = free[:count]
         self._used_mask[rows] = True
         return rows
@@ -70,6 +69,9 @@ class GraphBuffer:
     def add(self, batch: Batch) -> torch.Tensor:
         """Insert a *Batch* of graphs and return their row IDs."""
         data_list: List[Data] = batch.to_data_list()
+        if batch.batch.numel() == 0:
+            # Handle empty batch: return empty tensor of correct type and device
+            return torch.tensor([-1], dtype=torch.long, device=self.device)
         rows = self._allocate_rows(len(data_list))
 
         # Infer node feature dimension on first add if needed
@@ -86,13 +88,16 @@ class GraphBuffer:
             e_idx = data.edge_index.to(self.device)
             raw_x = getattr(data, "x", None)
             n_feat = raw_x.to(self.device) if raw_x is not None else None
-            if e_idx.size(1) > self.max_edges:
-                raise ValueError("Graph has more edges than max_edges")
-            if n_feat is not None:
-                if n_feat.size(0) > self.max_nodes:
-                    raise ValueError("Graph has more nodes than max_nodes")
-                if n_feat.size(1) != self.node_feat_dim:
-                    raise ValueError("Node-feature dimension mismatch across graphs")
+            assert e_idx.size(1) <= self.max_edges, ValueError(
+                "Graph has more edges than max_edges"
+            )
+            if n_feat is not None and n_feat.size(0) > 0:
+                assert n_feat.size(0) <= self.max_nodes, ValueError(
+                    "Graph has more nodes than max_nodes"
+                )
+                assert n_feat.size(1) == self.node_feat_dim, ValueError(
+                    "Node-feature dimension mismatch across graphs"
+                )
 
             # --- Store edge_index -----------------------------------------
             self._edge_index[buf_idx].fill_(-1)
@@ -101,7 +106,7 @@ class GraphBuffer:
 
             # --- Store node features --------------------------------------
             self._num_nodes[buf_idx] = n_feat.size(0) if n_feat is not None else 0
-            if n_feat is not None:
+            if n_feat is not None and n_feat.size(0) > 0:
                 self._node_feat[buf_idx].zero_()
                 self._node_feat[buf_idx, : n_feat.size(0)] = n_feat
 
@@ -115,8 +120,10 @@ class GraphBuffer:
             ids_list = list(ids)
         datas: List[Data] = []
         for idx in ids_list:
-            if not self._used_mask[idx]:
-                raise ValueError(f"Slot {idx} is empty")
+            if idx == -1:
+                datas.append(Data())
+                continue
+            assert self._used_mask[idx], f"Slot {idx} is empty"
             e_cnt = int(self._num_edges[idx].item())
             n_cnt = int(self._num_nodes[idx].item())
             edge_index = self._edge_index[idx, :, :e_cnt].clone()
@@ -124,7 +131,7 @@ class GraphBuffer:
             if self._node_feat is not None and n_cnt > 0:
                 x = self._node_feat[idx, :n_cnt].clone()
             datas.append(Data(x=x, edge_index=edge_index))
-        return Batch.from_data_list(cast(Sequence[Data], datas))
+        return Batch.from_data_list(datas)
 
     def cleanup(self, active_ids: torch.Tensor | Sequence[int]):
         """Mark only *active_ids* as used, freeing everything else."""

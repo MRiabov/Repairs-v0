@@ -192,15 +192,16 @@ class GraphEncoderWithGlobalFeatures(GraphEncoder):
         self.global_feat_encoder = SparseGlobalFeaturesEncoder(
             global_embedding_in_dim, hidden_dim_global, out_dim_global, dtype=dtype
         )
-        self.global_bn1 = nn.BatchNorm1d(out_dim_graph + out_dim_global, dtype=dtype)
-        self.global_out_lin = nn.Linear(out_dim_global, out_dim_global, dtype=dtype)
+        cat_dim = out_dim_graph + out_dim_global
+        self.global_bn1 = nn.BatchNorm1d(cat_dim, dtype=dtype)
+        self.global_out_lin = nn.Linear(cat_dim, cat_dim, dtype=dtype)
 
     def forward(self, data: Batch):
         graph_emb = self.graph_encoder(data)
         global_emb = self.global_feat_encoder(data.global_feat, data.batch)
         global_emb = torch.cat([graph_emb, global_emb], dim=1)
-        global_emb = F.relu(global_emb)
         global_emb = self.global_bn1(global_emb)
+        global_emb = F.relu(global_emb)
         global_emb = self.global_out_lin(global_emb)
         return global_emb
 
