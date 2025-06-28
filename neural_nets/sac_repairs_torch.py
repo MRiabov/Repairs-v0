@@ -42,6 +42,23 @@ class SACActor(nn.Module):
         self.device = device or torch.device(
             "cuda" if torch.cuda.is_available() else "cpu"
         )
+
+        # --- Voxel encoding helpers for torchsparse ---
+        @torch._dynamo.disable
+        def voxel_encode(x):
+            x = self.voxel_conv1(x)
+            x = self.voxel_act(x)
+            x = self.voxel_bn1(x)
+            x = self.voxel_conv2(x)
+            x = self.voxel_act(x)
+            x = self.voxel_bn2(x)
+            x = self.voxel_conv3(x)
+            x = self.voxel_act(x)
+            x = self.voxel_bn3(x)
+            x_dense = x.dense()
+            return x_dense.view(x_dense.size(0), -1).to(torch.bfloat16)
+
+        self._voxel_encode = voxel_encode
         # Voxel encoder (3D conv layers)
         self.voxel_conv1 = tsnn.Conv3d(1, 2, kernel_size=(6, 6, 6), stride=(4, 4, 4))
         self.voxel_bn1 = tsnn.BatchNorm(2)
@@ -78,13 +95,16 @@ class SACActor(nn.Module):
         self.vid2_bn3 = nn.BatchNorm2d(14, dtype=torch.bfloat16)
 
         # graph
+        assert mechanics_graph_out_dim % 2 == 0, (
+            "mechanics_graph_out_dim must be even for global features"
+        )
         self.mech_graph_encoder = GraphEncoderWithGlobalFeatures(
             num_features_graph=mechanics_graph_in_dim,
             hidden_dim_graph=256,
-            out_dim_graph=mechanics_graph_out_dim,
-            global_embedding_in_dim=4,
+            out_dim_graph=mechanics_graph_out_dim // 2,
+            global_embedding_in_dim=8,
             hidden_dim_global=256,
-            out_dim_global=mechanics_graph_out_dim,
+            out_dim_global=mechanics_graph_out_dim // 2,
             heads=2,
             dtype=torch.bfloat16,
         )
@@ -126,29 +146,8 @@ class SACActor(nn.Module):
         # TODO add support for mech graphs.
 
         # assume voxel_init_obs shape [B, D, H, W]
-        x_vox_i = self.voxel_conv1(voxel_init_obs)
-        x_vox_i = self.voxel_act(x_vox_i)
-        x_vox_i = self.voxel_bn1(x_vox_i)
-        x_vox_i = self.voxel_conv2(x_vox_i)
-        x_vox_i = self.voxel_act(x_vox_i)
-        x_vox_i = self.voxel_bn2(x_vox_i)
-        x_vox_i = self.voxel_conv3(x_vox_i)
-        x_vox_i = self.voxel_act(x_vox_i)
-        x_vox_i = self.voxel_bn3(x_vox_i)
-        x_v_dense = x_vox_i.dense()
-        x_vox_i = x_v_dense.view(x_v_dense.size(0), -1).to(torch.bfloat16)
-        # desired voxels
-        x_vox_d = self.voxel_conv1(voxel_des_obs)
-        x_vox_d = self.voxel_act(x_vox_d)
-        x_vox_d = self.voxel_bn1(x_vox_d)
-        x_vox_d = self.voxel_conv2(x_vox_d)
-        x_vox_d = self.voxel_act(x_vox_d)
-        x_vox_d = self.voxel_bn2(x_vox_d)
-        x_vox_d = self.voxel_conv3(x_vox_d)
-        x_vox_d = self.voxel_act(x_vox_d)
-        x_vox_d = self.voxel_bn3(x_vox_d)
-        x_v_dense = x_vox_d.dense()
-        x_vox_d = x_v_dense.view(x_v_dense.size(0), -1).to(torch.bfloat16)
+        x_vox_i = self._voxel_encode(voxel_init_obs)
+        x_vox_d = self._voxel_encode(voxel_des_obs)
 
         # assume video_obs shape [B, C, H, W]
         vid_1 = video_obs[:, 0]
@@ -218,10 +217,10 @@ class SACActor(nn.Module):
             voxel_init_obs,
             voxel_des_obs,
             video_obs,
-            mech_graph_init_obs,
-            mech_graph_des_obs,
-            elec_graph_init_obs,
-            elec_graph_des_obs,
+            mech_graph_init_obs.to(self.device),
+            mech_graph_des_obs.to(self.device),
+            elec_graph_init_obs.to(self.device),
+            elec_graph_des_obs.to(self.device),
         )
         std = log_std.exp()
         if deterministic:
@@ -242,6 +241,16 @@ class SACActor(nn.Module):
         return action.to(torch.bfloat16), log_prob.to(torch.bfloat16)
 
 
+import torch
+
+if hasattr(torch, "_dynamo"):
+    torch_compile_disable = torch._dynamo.disable
+else:
+
+    def torch_compile_disable(fn):
+        return fn
+
+
 class SACCritic(nn.Module):
     """
     PyTorch implementation of twin Q-function critic.
@@ -260,6 +269,22 @@ class SACCritic(nn.Module):
         self.device = device or torch.device(
             "cuda" if torch.cuda.is_available() else "cpu"
         )
+
+        # --- Voxel encoding helpers for torchsparse ---
+        @torch._dynamo.disable
+        def voxel_encode_q1(x):
+            x = self.conv3d_q1(x)
+            x_dense = x.dense()
+            return x_dense.view(x_dense.size(0), -1).to(torch.bfloat16)
+
+        @torch._dynamo.disable
+        def voxel_encode_q2(x):
+            x = self.conv3d_q2(x)
+            x_dense = x.dense()
+            return x_dense.view(x_dense.size(0), -1).to(torch.bfloat16)
+
+        self._voxel_encode_q1 = voxel_encode_q1
+        self._voxel_encode_q2 = voxel_encode_q2
         # Shared conv encoders for Q1
         self.conv3d_q1 = nn.Sequential(
             tsnn.Conv3d(1, 2, kernel_size=(6, 6, 6), stride=(4, 4, 4)),
@@ -326,7 +351,7 @@ class SACCritic(nn.Module):
             num_features_graph=mechanics_graph_in_dim,
             hidden_dim_graph=256,
             out_dim_graph=mechanics_graph_out_dim,
-            global_embedding_in_dim=4,
+            global_embedding_in_dim=8,
             hidden_dim_global=256,
             out_dim_global=electronics_graph_out_dim,
             heads=2,
@@ -387,7 +412,7 @@ class SACCritic(nn.Module):
             216,
             256,
             electronics_graph_out_dim,
-            global_embedding_in_dim=4,
+            global_embedding_in_dim=8,
             hidden_dim_global=256,
             out_dim_global=electronics_graph_out_dim,
             heads=2,
@@ -414,16 +439,9 @@ class SACCritic(nn.Module):
     ):
         # Encoder Q1
         # voxels
-        x_vox_init_q1 = self.conv3d_q1(voxel_init_obs)
-        x_vox_des_q1 = self.conv3d_q1(voxel_des_obs)
-        x_vox_init_q1_dense = x_vox_init_q1.dense()
-        x_vox_des_q1_dense = x_vox_des_q1.dense()
-        x_vox_init_q1 = x_vox_init_q1_dense.view(x_vox_init_q1_dense.size(0), -1).to(
-            torch.bfloat16
-        )
-        x_vox_des_q1 = x_vox_des_q1_dense.view(x_vox_des_q1_dense.size(0), -1).to(
-            torch.bfloat16
-        )
+        x_vox_init_q1 = self._voxel_encode_q1(voxel_init_obs)
+        x_vox_des_q1 = self._voxel_encode_q1(voxel_des_obs)
+
         # vid
         x_vid1 = self.vid1_q1(video_obs[:, 0]).view(video_obs.size(0), -1)
         x_vid2 = self.vid2_q1(video_obs[:, 1]).view(video_obs.size(0), -1)
@@ -452,16 +470,9 @@ class SACCritic(nn.Module):
         q1 = self.q1_fc(x1)
         # Encoder Q2
         # voxels
-        x_vox_init_q2 = self.conv3d_q2(voxel_init_obs)
-        x_vox_des_q2 = self.conv3d_q2(voxel_des_obs)
-        x_vox_init_q2_dense = x_vox_init_q2.dense()
-        x_vox_des_q2_dense = x_vox_des_q2.dense()
-        x_vox_init_q2 = x_vox_init_q2_dense.view(x_vox_init_q2_dense.size(0), -1).to(
-            torch.bfloat16
-        )
-        x_vox_des_q2 = x_vox_des_q2_dense.view(x_vox_des_q2_dense.size(0), -1).to(
-            torch.bfloat16
-        )
+        x_vox_init_q2 = self._voxel_encode_q2(voxel_init_obs)
+        x_vox_des_q2 = self._voxel_encode_q2(voxel_des_obs)
+
         # vid
         x_vid1_q2 = self.vid1_q2(video_obs[:, 0])
         x_vid1_q2 = x_vid1_q2.view(x_vid1_q2.size(0), -1).to(torch.bfloat16)
@@ -497,6 +508,7 @@ class SACTrainer:
         self,
         action_dim,
         electronics_graph_encoded_dim,
+        mechanics_graph_encoded_dim,
         device=None,
         gamma=0.99,
         tau=0.005,
@@ -517,20 +529,21 @@ class SACTrainer:
             electronics_graph_in_dim=4,
             electronics_graph_out_dim=electronics_graph_encoded_dim,
             mechanics_graph_in_dim=8,
-            mechanics_graph_out_dim=electronics_graph_encoded_dim,
+            mechanics_graph_out_dim=mechanics_graph_encoded_dim,
         ).to(self.device)
         self.critic = SACCritic(
             action_dim,
             electronics_graph_in_dim=4,
             electronics_graph_out_dim=electronics_graph_encoded_dim,
             mechanics_graph_in_dim=8,
-            mechanics_graph_out_dim=electronics_graph_encoded_dim,
+            mechanics_graph_out_dim=mechanics_graph_encoded_dim,
         ).to(self.device)
         # Try to speed-up networks with torch.compile (PyTorch ≥ 2.0). If it
         # fails (e.g., unsupported ops), fall back to eager modules.
         try:
-            self.actor = torch.compile(self.actor, mode="default")
-            self.critic = torch.compile(self.critic, mode="default")
+            # self.actor = torch.compile(self.actor, mode="default")
+            # self.critic = torch.compile(self.critic, mode="default")
+            """ """
         except Exception as err:
             print(
                 f"[SACTrainer] torch.compile failed: {err}. Falling back to eager execution."
@@ -592,8 +605,16 @@ class SACTrainer:
             voxel_shape=(256, 256, 256),
             device=self.device,
         )
-        self.elec_graph_buffer = GraphBuffer(device=self.device)
-        self.mech_graph_buffer = GraphBuffer(device=self.device)
+        self.elec_graph_buffer = GraphBuffer(
+            node_feat_dim=4,
+            store_global_feat=False,
+            device=self.device,
+        )
+        self.mech_graph_buffer = GraphBuffer(
+            node_feat_dim=8,
+            store_global_feat=True,
+            device=self.device,
+        )
         # voxels ids
         self.voxel_ids = torch.zeros(batch_size, dtype=torch.int, device=self.device)
         self.des_voxel_ids = torch.zeros(
@@ -631,15 +652,15 @@ class SACTrainer:
                 voxel_init_obs,
                 voxel_des_obs,
                 video_obs.to(self.device),
-                elec_graph_init_obs,
-                elec_graph_des_obs,
-                mech_graph_init_obs,
-                mech_graph_des_obs,
+                elec_graph_init_obs.to(self.device),
+                elec_graph_des_obs.to(self.device),
+                mech_graph_init_obs.to(self.device),
+                mech_graph_des_obs.to(self.device),
             )
         self.actor.train()
         return action.cpu()
 
-    @torch.compile()  # dynamic=true? but is it?
+    # @torch.compile()  # dynamic=true? but is it?
     def update(
         self,
         vox_init,
@@ -799,24 +820,26 @@ class SACTrainer:
     ) -> tuple[Batch, Batch]:
         """Retrieve electronics graph tensors from the singleton buffer for a batch."""
         assert init_graph_ids.shape == des_graph_ids.shape, "Batch sizes must match"
-        assert torch.isin(init_graph_ids, des_graph_ids, invert=True).all(), (
-            "Desired and initial graph IDs must never match"
-        )
-        return self.mech_graph_buffer.get(init_graph_ids), self.mech_graph_buffer.get(
-            des_graph_ids
-        )
+        assert (
+            torch.isin(init_graph_ids, des_graph_ids, invert=True)
+            | (init_graph_ids == -1)
+        ).all(), "Desired and initial graph IDs must never match"
+        return self.elec_graph_buffer.get(init_graph_ids).to(
+            self.device
+        ), self.elec_graph_buffer.get(des_graph_ids).to(self.device)
 
     def get_batch_mechanical_graphs(
         self, init_graph_ids: torch.Tensor, des_graph_ids: torch.Tensor
     ) -> tuple[Batch, Batch]:
         """Retrieve mechanical graph tensors from the singleton buffer for a batch."""
         assert init_graph_ids.shape == des_graph_ids.shape, "Batch sizes must match"
-        assert torch.isin(init_graph_ids, des_graph_ids, invert=True).all(), (
-            "Desired and initial graph IDs must never match"
-        )
-        return self.mech_graph_buffer.get(init_graph_ids), self.mech_graph_buffer.get(
-            des_graph_ids
-        )
+        assert (
+            torch.isin(init_graph_ids, des_graph_ids, invert=True)
+            | (init_graph_ids == -1)
+        ).all(), "Desired and initial graph IDs must never match"
+        return self.mech_graph_buffer.get(init_graph_ids).to(
+            self.device
+        ), self.mech_graph_buffer.get(des_graph_ids).to(self.device)
 
 
 # ===== Training Orchestrator =====
@@ -830,7 +853,8 @@ def run_training(
     ml_batch_dim,
     sample_batch_size,
     action_dim,
-    electronics_graph_dim,
+    electronics_graph_out_dim,
+    mechanics_graph_out_dim,
     num_steps=100000,
     prefill_steps=1000,
     buffer_size=10000,
@@ -853,7 +877,8 @@ def run_training(
     )
     trainer = SACTrainer(
         action_dim,
-        electronics_graph_dim,
+        electronics_graph_out_dim,
+        mechanics_graph_out_dim,
         buffer_size=buffer_size,
         singleton_buffer_size=singleton_buffer_size,
         batch_size=ml_batch_dim,
@@ -876,16 +901,16 @@ def run_training(
         (ml_batch_dim,), dtype=torch.bool
     )  # all true to write into buffers.
     trainer._add_to_buffer(
-        video_obs,
-        torch.zeros((ml_batch_dim, action_dim), dtype=torch.bfloat16),
-        torch.zeros((ml_batch_dim,), dtype=torch.bfloat16),
-        done,
-        voxel_init_obs,
-        voxel_des_obs,
-        elec_graph_init_obs,
-        elec_graph_des_obs,
-        mech_graph_init_obs,
-        mech_graph_des_obs,
+        video_obs=video_obs,
+        action=torch.zeros((ml_batch_dim, action_dim), dtype=torch.bfloat16),
+        rewards=torch.zeros((ml_batch_dim,), dtype=torch.bfloat16),
+        done=done,
+        voxel_init_obs=voxel_init_obs,
+        voxel_des_obs=voxel_des_obs,
+        elec_graph_init_obs=elec_graph_init_obs,
+        elec_graph_des_obs=elec_graph_des_obs,
+        mech_graph_init_obs=mech_graph_init_obs,
+        mech_graph_des_obs=mech_graph_des_obs,
     )
 
     prefill_start_time = time.time()
@@ -951,10 +976,10 @@ def run_training(
             sparse_coo_to_torchsparse(voxel_init_obs),
             sparse_coo_to_torchsparse(voxel_des_obs),
             video_obs,
-            elec_graph_init_obs,
-            elec_graph_des_obs,
-            mech_graph_init_obs,
-            mech_graph_des_obs,
+            elec_graph_init_obs.to(trainer.device),
+            elec_graph_des_obs.to(trainer.device),
+            mech_graph_init_obs.to(trainer.device),
+            mech_graph_des_obs.to(trainer.device),
         )
 
         # Step environment
@@ -1134,6 +1159,7 @@ if __name__ == "__main__":
         7,
     )  # 2 cameras, 7 channels (RGB, depth, segmentation)
     electronics_graph_encoded_dim = 64  # latent dim from graph encoder
+    mechanics_graph_encoded_dim = 128
     electronics_graph_feat = 4  # number of features in graph.x
     voxel_obs_dim = (2, 256, 256, 256)  # start and finish # should be sparse?
 
@@ -1147,10 +1173,10 @@ if __name__ == "__main__":
     ) // batch_size
     # train_steps = (10_000_000 if jax.default_backend() == "gpu" else 3000) // batch_size
     buffer_size = (
-        500 if debug else 200_000
+        100 if debug else 200_000
     )  # was 200_000, reduced due to GPU constraints.
     singleton_buffer_size = (
-        200 if debug else 10_000
+        20 if debug else 10_000
     )  # was 200_000, reduced due to GPU constraints.
     min_buffer_len = 40 if debug else 10_000
     prefill_steps = min_buffer_len // batch_size + 1
@@ -1166,7 +1192,8 @@ if __name__ == "__main__":
         command_cfg=command_cfg,
         ml_batch_dim=batch_size,
         action_dim=action_dim,
-        electronics_graph_dim=electronics_graph_encoded_dim,
+        electronics_graph_out_dim=electronics_graph_encoded_dim,
+        mechanics_graph_out_dim=mechanics_graph_encoded_dim,
         buffer_size=buffer_size,
         singleton_buffer_size=singleton_buffer_size,
         prefill_steps=prefill_steps,

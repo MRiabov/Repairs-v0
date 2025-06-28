@@ -86,6 +86,8 @@ class GAT(nn.Module):
             x is None or x.shape[0] == 0
         ):  # note: sometimes there will be no graph, e.g. no electronics present. then, return a learnable parameter.
             return self.learnable_empty
+        # Ensure node features tensor has same dtype as model parameters
+        x = x.to(self.learnable_empty.dtype)
         x = self.gat1(x, edge_index)
         x = F.relu(x)
         x = F.dropout(x, training=self.training)
@@ -195,10 +197,16 @@ class GraphEncoderWithGlobalFeatures(GraphEncoder):
         cat_dim = out_dim_graph + out_dim_global
         self.global_bn1 = nn.BatchNorm1d(cat_dim, dtype=dtype)
         self.global_out_lin = nn.Linear(cat_dim, cat_dim, dtype=dtype)
+        self.dtype = dtype
 
     def forward(self, data: Batch):
         graph_emb = self.graph_encoder(data)
-        global_emb = self.global_feat_encoder(data.global_feat, data.batch)
+        global_emb = self.global_feat_encoder(
+            # FIXME: data.batch is incorrect! data.batch is the batch of nodes, not the batch of graph-level features.
+            data.global_feat.to(self.dtype),
+            data.global_feat_batch,  # note: created during Batch.from_data_list(follow_batch="global_feat")
+            batch_size=data.num_graphs,
+        )
         global_emb = torch.cat([graph_emb, global_emb], dim=1)
         global_emb = self.global_bn1(global_emb)
         global_emb = F.relu(global_emb)
@@ -215,12 +223,14 @@ class SparseGlobalFeaturesEncoder(nn.Module):
         self.bn2 = nn.BatchNorm1d(out_dim, dtype=dtype)
         self.aggr = aggr
 
-    def forward(self, x, batch):
+    def forward(self, x, batch, batch_size: int):
         x = self.fc1(x)
         x = self.bn1(x)
         x = F.relu(x)
         x = self.fc2(x)
         x = self.bn2(x)
-        x = scatter_mean(x, batch, dim=0, dim_size=batch.num_graphs)
+        x = scatter_mean(
+            x, batch, dim=0, dim_size=batch_size
+        )  # dim_size=batch.num_graphs # would need to pass full graph otherwise
         # ^mean normalises the graph-level embeddings
         return x  # returns a batch of graph-level embeddings
