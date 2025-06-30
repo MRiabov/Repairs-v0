@@ -129,7 +129,7 @@ class GraphEncoder(nn.Module):
         self.gate = nn.Linear(out_dim, 1, dtype=dtype)
         self.dtype = dtype
 
-    def forward(self, batch: Batch):
+    def forward(self, batch: Batch, expected_batch_dim: int = -1):
         """Return a gated, graph-level embedding.
 
         The method supports batched graphs (``data.batch`` attribute). If no
@@ -144,25 +144,36 @@ class GraphEncoder(nn.Module):
         gated_emb = node_emb * gates  # [N, out_dim]
 
         # Weighted sum pooling followed by normalisation (weighted mean).
-        num_graphs = batch.num_graphs
-        if batch.batch.numel() == 0:
-            # for debug: if no nodes to pool, return zeros instead.
-            pooled = torch.zeros(
-                (num_graphs, gated_emb.size(-1)),
-                device=gated_emb.device,
-                dtype=self.dtype,
+        if torch.numel(batch.batch) > 0:
+            assert torch.numel(batch.batch) >= batch.num_graphs, (
+                "batch.numel() should be greater than batch.num_graphs"
+            )  # and of course non-zero.
+            pooled = scatter_add(
+                gated_emb, batch.batch, dim=0, dim_size=batch.num_graphs
             )
-            norm = torch.ones(
-                (num_graphs, 1), device=gated_emb.device, dtype=self.dtype
-            )  # Or 1s to avoid div by zero
+            norm = scatter_add(
+                gates, batch.batch, dim=0, dim_size=batch.num_graphs
+            ).clamp(min=1e-6)
+            graph_emb = (pooled / norm).squeeze(0)
         else:
-            pooled = scatter_add(gated_emb, batch.batch, dim=0, dim_size=num_graphs)
-            norm = scatter_add(gates, batch.batch, dim=0, dim_size=num_graphs).clamp(
-                min=1e-6
+            # for debug: if no nodes to pool, return zeros instead.
+            # pooled = torch.zeros(
+            #     (batch.num_graphs, gated_emb.size(-1)),
+            #     device=gated_emb.device,
+            #     dtype=self.dtype,
+            # )
+            # norm = torch.ones(
+            #     (batch.num_graphs, 1), device=gated_emb.device, dtype=self.dtype
+            # )  # Or 1s to avoid div by zero
+            # to avoid issues with batch.num_graphs being 0
+            assert expected_batch_dim > 0, (
+                "expected_batch_dim must be positive when graph batch is empty"
             )
-        graph_emb = pooled / norm
+            graph_emb = torch.zeros(
+                (expected_batch_dim, gated_emb.size(-1)), dtype=self.dtype
+            )
 
-        return graph_emb.squeeze(0)
+        return graph_emb
 
 
 class GraphEncoderWithGlobalFeatures(GraphEncoder):
@@ -199,8 +210,8 @@ class GraphEncoderWithGlobalFeatures(GraphEncoder):
         self.global_out_lin = nn.Linear(cat_dim, cat_dim, dtype=dtype)
         self.dtype = dtype
 
-    def forward(self, data: Batch):
-        graph_emb = self.graph_encoder(data)
+    def forward(self, data: Batch, expected_batch_dim: int = -1):
+        graph_emb = self.graph_encoder(data, expected_batch_dim)
         global_emb = self.global_feat_encoder(
             # FIXME: data.batch is incorrect! data.batch is the batch of nodes, not the batch of graph-level features.
             data.global_feat.to(self.dtype),

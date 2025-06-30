@@ -169,15 +169,16 @@ class SACActor(nn.Module):
         x_vid2 = x_vid2.reshape(x_vid2.size(0), -1)
 
         # observe graphs:
+        batch_shape = x_vid1.shape[0]
         encoded_mech_graph_i = self.mech_graph_encoder(
-            mech_graph_init_obs
+            mech_graph_init_obs, batch_shape
         )  # not x_graph because graphs have their own x
         encoded_mech_graph_d = self.mech_graph_encoder(
-            mech_graph_des_obs
+            mech_graph_des_obs, batch_shape
         )  # not x_graph because graphs have their own x
 
-        encoded_elec_graph_i = self.elec_graph_encoder(elec_graph_init_obs)
-        encoded_elec_graph_d = self.elec_graph_encoder(elec_graph_des_obs)
+        encoded_elec_graph_i = self.elec_graph_encoder(elec_graph_init_obs, batch_shape)
+        encoded_elec_graph_d = self.elec_graph_encoder(elec_graph_des_obs, batch_shape)
 
         # concatenate all features
         x = torch.cat(
@@ -350,10 +351,10 @@ class SACCritic(nn.Module):
         self.mech_graph_encoder_q1 = GraphEncoderWithGlobalFeatures(
             num_features_graph=mechanics_graph_in_dim,
             hidden_dim_graph=256,
-            out_dim_graph=mechanics_graph_out_dim,
+            out_dim_graph=mechanics_graph_out_dim // 2,
             global_embedding_in_dim=8,
             hidden_dim_global=256,
-            out_dim_global=electronics_graph_out_dim,
+            out_dim_global=mechanics_graph_out_dim // 2,
             heads=2,
             dtype=torch.bfloat16,
         )
@@ -409,12 +410,12 @@ class SACCritic(nn.Module):
             nn.Linear(256, 1, dtype=torch.bfloat16),
         )
         self.mech_graph_encoder_q2 = GraphEncoderWithGlobalFeatures(
-            216,
-            256,
-            electronics_graph_out_dim,
+            num_features_graph=mechanics_graph_in_dim,
+            hidden_dim_graph=256,
+            out_dim_graph=mechanics_graph_out_dim // 2,
             global_embedding_in_dim=8,
             hidden_dim_global=256,
-            out_dim_global=electronics_graph_out_dim,
+            out_dim_global=mechanics_graph_out_dim // 2,
             heads=2,
             dtype=torch.bfloat16,
         )
@@ -447,10 +448,15 @@ class SACCritic(nn.Module):
         x_vid2 = self.vid2_q1(video_obs[:, 1]).view(video_obs.size(0), -1)
 
         # graph
-        mech_graph_init_q1 = self.mech_graph_encoder_q1(mech_graph_init_obs)
-        mech_graph_des_q1 = self.mech_graph_encoder_q1(mech_graph_des_obs)
-        elec_graph_init_q1 = self.elec_graph_encoder_q1(elec_graph_init_obs)
-        elec_graph_des_q1 = self.elec_graph_encoder_q1(elec_graph_des_obs)
+        batch_shape = x_vid1.shape[0]
+        mech_graph_init_q1 = self.mech_graph_encoder_q1(
+            mech_graph_init_obs, batch_shape
+        )
+        mech_graph_des_q1 = self.mech_graph_encoder_q1(mech_graph_des_obs, batch_shape)
+        elec_graph_init_q1 = self.elec_graph_encoder_q1(
+            elec_graph_init_obs, batch_shape
+        )
+        elec_graph_des_q1 = self.elec_graph_encoder_q1(elec_graph_des_obs, batch_shape)
 
         x1 = torch.cat(
             [
@@ -479,10 +485,15 @@ class SACCritic(nn.Module):
         x_vid2_q2 = self.vid2_q2(video_obs[:, 1])
         x_vid2_q2 = x_vid2_q2.view(x_vid2_q2.size(0), -1).to(torch.bfloat16)
         # graph
-        mech_graph_init_q2 = self.mech_graph_encoder_q2(mech_graph_init_obs)
-        mech_graph_des_q2 = self.mech_graph_encoder_q2(mech_graph_des_obs)
-        elec_graph_init_q2 = self.elec_graph_encoder_q2(elec_graph_init_obs)
-        elec_graph_des_q2 = self.elec_graph_encoder_q2(elec_graph_des_obs)
+        batch_shape = x_vid1_q2.shape[0]
+        mech_graph_init_q2 = self.mech_graph_encoder_q2(
+            mech_graph_init_obs, batch_shape
+        )
+        mech_graph_des_q2 = self.mech_graph_encoder_q2(mech_graph_des_obs, batch_shape)
+        elec_graph_init_q2 = self.elec_graph_encoder_q2(
+            elec_graph_init_obs, batch_shape
+        )
+        elec_graph_des_q2 = self.elec_graph_encoder_q2(elec_graph_des_obs, batch_shape)
         x2 = torch.cat(
             [
                 x_vox_init_q2,
@@ -606,13 +617,13 @@ class SACTrainer:
             device=self.device,
         )
         self.elec_graph_buffer = GraphBuffer(
-            node_feat_dim=4,
-            store_global_feat=False,
-            device=self.device,
+            node_feat_dim=4, store_global_feat=False, device=self.device
         )
         self.mech_graph_buffer = GraphBuffer(
             node_feat_dim=8,
             store_global_feat=True,
+            max_globals=12,
+            global_feat_dim=8,
             device=self.device,
         )
         # voxels ids
@@ -686,22 +697,53 @@ class SACTrainer:
                 elec_g_des,
             )
             q1n, q2n = self.critic_target(
-                vox_init, vox_des, vid_obs, elec_g_init, elec_g_des, na
+                vox_init,
+                vox_des,
+                vid_obs,
+                mech_g_init,
+                mech_g_des,
+                elec_g_init,
+                elec_g_des,
+                na,
             )
             qn = torch.min(q1n, q2n) - self.log_alpha.exp() * nlp
             target = (
                 r.unsqueeze(-1)
                 + self.gamma * (1 - d.unsqueeze(-1).to(torch.bfloat16)) * qn
             ).to(torch.bfloat16)
-        q1, q2 = self.critic(vox_init, vox_des, vid_obs, elec_g_init, g_des, a)
+        q1, q2 = self.critic(
+            vox_init,
+            vox_des,
+            vid_obs,
+            mech_g_init,
+            mech_g_des,
+            elec_g_init,
+            elec_g_des,
+            a,
+        )
         cl = (F.mse_loss(q1, target) + F.mse_loss(q2, target)).to(torch.bfloat16)
         self.critic_optimizer.zero_grad()
         cl.backward()
         self.critic_optimizer.step()
         a2, lp = self.actor.sample_action(
-            vox_init, vox_des, vid_obs, elec_g_init, g_des
+            vox_init,
+            vox_des,
+            vid_obs,
+            mech_g_init,
+            mech_g_des,
+            elec_g_init,
+            elec_g_des,
         )
-        q1n, q2n = self.critic(vox_init, vox_des, vid_obs, elec_g_init, g_des, a2)
+        q1n, q2n = self.critic(
+            vox_init,
+            vox_des,
+            vid_obs,
+            mech_g_init,
+            mech_g_des,
+            elec_g_init,
+            elec_g_des,
+            a2,
+        )
         al = (self.log_alpha.exp() * lp - torch.min(q1n, q2n)).mean()
         self.actor_optimizer.zero_grad()
         al.backward()
@@ -1069,6 +1111,7 @@ if __name__ == "__main__":
 
     debug = True  # True
     force_recreate_data = False  # True
+    # Note: set force_recreate_data to True after non-debug runs to remove large config files.
 
     # Environment configuration
     env_cfg = {

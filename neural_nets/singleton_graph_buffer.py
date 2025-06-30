@@ -25,7 +25,8 @@ class GraphBuffer:
         buffer_size: int = 1024,
         max_nodes: int = 16,
         max_edges: int = 10,
-        max_globals: int = 12,
+        max_globals: int | None = None,
+        global_feat_dim: int | None = None,
         device: str | torch.device = "cuda" if torch.cuda.is_available() else "cpu",
         values_dtype=torch.float16,
     ) -> None:
@@ -39,6 +40,12 @@ class GraphBuffer:
         self.node_feat_dim = node_feat_dim
         self.store_global_feat = store_global_feat
         if store_global_feat:
+            assert global_feat_dim is not None, (
+                "global_feat_dim must be specified if store_global_feat is True"
+            )
+            assert max_globals is not None, (
+                "max_globals must be specified if store_global_feat is True"
+            )
             self.follow_batch = ["global_feat"]
         else:
             self.follow_batch = []
@@ -60,7 +67,7 @@ class GraphBuffer:
         # Optional global features ---------------------------------------
         if self.store_global_feat:
             self._global_feat = torch.zeros(
-                (buffer_size, max_globals, node_feat_dim),
+                (buffer_size, max_globals, global_feat_dim),
                 device=self.device,
                 dtype=values_dtype,
             )
@@ -195,7 +202,12 @@ class GraphBuffer:
         valid_ids = ids[valid_mask]  # (G,) where G <= B
         if valid_ids.numel() == 0:
             # Request only had padding → return *empty* Batch
-            return Batch()
+            return Batch(
+                num_graphs=ids.size(0),  # it will return ids.size(0) 0s in the encoder.
+                batch=torch.empty(0, dtype=torch.long),
+                x=torch.empty((0, self.node_feat_dim), dtype=torch.float),
+                edge_index=torch.empty((2, 0), dtype=torch.long),
+            )
 
         # ------------------------------------------------------------------
         # Gather per-graph sizes (vectorised) -------------------------------
@@ -258,7 +270,31 @@ class GraphBuffer:
             num_graphs=valid_ids.numel(),
         )
         if self.store_global_feat:
-            kwargs["global_feat"] = self._global_feat[valid_ids]
+            # ------------------------------------------------------------------
+            # Assemble sparse global features ---------------------------------
+            # ------------------------------------------------------------------
+            gf_counts = self._num_globals[valid_ids]  # (G,)
+            if gf_counts.sum() > 0:
+                gf_mask = (
+                    torch.arange(self.max_globals, device=self.device)
+                    .unsqueeze(0)
+                    .expand(valid_ids.size(0), self.max_globals)
+                ) < gf_counts.unsqueeze(1)  # (G, max_globals)
+                global_feat_all = self._global_feat[valid_ids][gf_mask]  # (∑Gi, F)
+                global_feat_batch = torch.repeat_interleave(
+                    torch.arange(valid_ids.size(0), device=self.device), gf_counts
+                )  # (∑Gi,)
+                kwargs["global_feat"] = global_feat_all
+                kwargs["global_feat_batch"] = global_feat_batch
+            else:
+                kwargs["global_feat"] = torch.empty(
+                    (0, self.node_feat_dim),
+                    device=self.device,
+                    dtype=self._node_feat.dtype,
+                )
+                kwargs["global_feat_batch"] = torch.empty(
+                    (0,), device=self.device, dtype=torch.long
+                )
         batch = Batch(**kwargs)
 
         # Compact; padded ids ignored
