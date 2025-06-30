@@ -996,11 +996,6 @@ def run_training(
             mech_graph_des_obs=mech_graph_des_obs,
             action=rand_action,
             rewards=rewards,
-            # next_voxel_init_obs=voxel_init,
-            # next_voxel_des_obs=voxel_des,
-            # next_video_obs=video_obs,
-            # next_graph_curr_obs=graph_obs,
-            # next_graph_des_obs=graph_des,
             done=dones,
         )
         prev_video_obs = video_obs
@@ -1107,7 +1102,7 @@ if __name__ == "__main__":
 
     # Create task and environment setup
     tasks = [AssembleTask(), DisassembleTask()]
-    env_setups = [MoveBoxSetup()]
+    env_setups = [MoveBoxSetup(), MoveBoxSetup()]  # duplicate because does not matter.
 
     debug = True  # True
     force_recreate_data = False  # True
@@ -1176,7 +1171,7 @@ if __name__ == "__main__":
             "path": "/workspace/data/obs/",
         },
         "force_recreate_data": force_recreate_data,
-        "env_setup_ids": list(range(1)),  # 1 scene now.
+        "env_setup_ids": list(range(2)),  # 1 scene now.
     }
 
     command_cfg = {
