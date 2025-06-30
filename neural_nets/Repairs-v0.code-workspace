@@ -1,0 +1,13 @@
+{
+	"folders": [
+		{
+			"path": ".."
+		},
+		{
+			"path": "../../RepairsComponents-v0"
+		}
+	],
+	"settings": {
+		"python.languageServer": "None"
+	}
+}
