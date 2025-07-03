@@ -22,8 +22,6 @@ class TenHoles(EnvSetup):
             False, initial_body_a="base_box@solid"
         ).bd_geometry()
         fasteners = [fastener.moved(loc) for loc in grid_locs.locations]
-        for i, fastener in enumerate(fasteners):
-            fastener.label = f"{i}@fastener"
 
         return Compound(children=[base_box.part, *fasteners])
 

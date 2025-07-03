@@ -1,5 +1,9 @@
 import copy
 import time
+import os
+
+os.environ["PYOPENGL_PLATFORM"] = "egl"
+os.environ["EGL_PLATFORM"] = "surfaceless"
 
 import tensordict
 import torch
@@ -1098,15 +1102,17 @@ if __name__ == "__main__":
 
     # Initialize Genesis
     gs.init(
-        backend=gs.cuda, logging_level="warning"
+        backend=gs.cuda,
+        logging_level="debug",  # , logging_level="warning"
     )  # note: logging level "warning" because genesis spams step speed logs during training.
 
     # Create task and environment setup
     tasks = [AssembleTask(), DisassembleTask()]
     env_setups = [MoveBoxSetup(), TenHoles()]  # duplicate because does not matter.
+    # TODO robot selection (franka/humanoid)
 
     debug = True  # True
-    force_recreate_data = True  # True
+    force_recreate_data = False  # True
     # Note: set force_recreate_data to True after non-debug runs to remove large config files.
 
     # Environment configuration
