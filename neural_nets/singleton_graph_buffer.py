@@ -164,7 +164,7 @@ class GraphBuffer:
                 )
                 gf = g.global_feat
                 assert gf.size(0) <= self.max_globals, "Too many global features"
-                self._global_feat[row].zero_()
+                self._global_feat[row].zero_() # should be already 0?
                 self._global_feat[row, : gf.size(0)] = gf
                 self._num_globals[row] = gf.size(0)
 

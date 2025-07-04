@@ -628,7 +628,7 @@ class SACTrainer:
             node_feat_dim=8,
             store_global_feat=True,
             max_globals=12,
-            global_feat_dim=8,
+            global_feat_dim=9,
             device=self.device,
         )
         # voxels ids
@@ -961,9 +961,8 @@ def run_training(
     )
 
     prefill_start_time = time.time()
-    # debug
-    camera = env.__dict__["concurrent_scenes_data"][0].cameras[0]
-    camera.start_recording()
+    camera = env.__dict__["concurrent_scenes_data"][0].scene.visualizer.cameras[0]
+    # camera.start_recording()
     action_bound_min = torch.tensor(command_cfg["min_bounds"])
     action_bound_max = torch.tensor(command_cfg["max_bounds"])
 
@@ -1008,7 +1007,7 @@ def run_training(
     print(
         f"Buffer prefill steps ended. Elapsed time: {time.time() - prefill_start_time}"
     )
-    camera.stop_recording(save_to_filename="video.mp4", fps=50)
+    # camera.stop_recording(save_to_filename="video.mp4", fps=50)
 
     # Main training loop
     for step in range(num_steps):
@@ -1108,7 +1107,7 @@ if __name__ == "__main__":
 
     # Create task and environment setup
     tasks = [AssembleTask(), DisassembleTask()]
-    env_setups = [MoveBoxSetup(), TenHoles()]  # duplicate because does not matter.
+    env_setups = [MoveBoxSetup(), TenHoles()]
     # TODO robot selection (franka/humanoid)
 
     debug = True  # True
@@ -1178,7 +1177,7 @@ if __name__ == "__main__":
             "path": "/workspace/data/obs/",
         },
         "force_recreate_data": force_recreate_data,
-        "env_setup_ids": list(range(2)),  # 1 scene now.
+        "env_setup_ids": list(range(2)),  # 2 scenes now.
     }
 
     command_cfg = {
