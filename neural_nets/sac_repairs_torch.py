@@ -26,6 +26,7 @@ from torchsparse_util import sparse_coo_to_torchsparse
 
 from examples.box_to_pos_task import MoveBoxSetup
 from examples.ten_holes_14 import TenHoles
+from repairs_components.save_and_load.online_save import optional_save
 
 
 class SACActor(nn.Module):
@@ -40,6 +41,7 @@ class SACActor(nn.Module):
         mechanics_graph_in_dim,
         electronics_graph_out_dim,
         mechanics_graph_out_dim,
+        mech_global_embedding_in_dim,
         device=None,
         dtype=torch.bfloat16,
     ):
@@ -107,7 +109,7 @@ class SACActor(nn.Module):
             num_features_graph=mechanics_graph_in_dim,
             hidden_dim_graph=256,
             out_dim_graph=mechanics_graph_out_dim // 2,
-            global_embedding_in_dim=8,
+            global_embedding_in_dim=mech_global_embedding_in_dim,
             hidden_dim_global=256,
             out_dim_global=mechanics_graph_out_dim // 2,
             heads=2,
@@ -357,7 +359,7 @@ class SACCritic(nn.Module):
             num_features_graph=mechanics_graph_in_dim,
             hidden_dim_graph=256,
             out_dim_graph=mechanics_graph_out_dim // 2,
-            global_embedding_in_dim=8,
+            global_embedding_in_dim=mech_global_embedding_in_dim,
             hidden_dim_global=256,
             out_dim_global=mechanics_graph_out_dim // 2,
             heads=2,
@@ -418,7 +420,7 @@ class SACCritic(nn.Module):
             num_features_graph=mechanics_graph_in_dim,
             hidden_dim_graph=256,
             out_dim_graph=mechanics_graph_out_dim // 2,
-            global_embedding_in_dim=8,
+            global_embedding_in_dim=mech_global_embedding_in_dim,
             hidden_dim_global=256,
             out_dim_global=mechanics_graph_out_dim // 2,
             heads=2,
@@ -525,6 +527,7 @@ class SACTrainer:
         action_dim,
         electronics_graph_encoded_dim,
         mechanics_graph_encoded_dim,
+        mech_global_embedding_in_dim,
         device=None,
         gamma=0.99,
         tau=0.005,
@@ -546,6 +549,7 @@ class SACTrainer:
             electronics_graph_out_dim=electronics_graph_encoded_dim,
             mechanics_graph_in_dim=8,
             mechanics_graph_out_dim=mechanics_graph_encoded_dim,
+            mech_global_embedding_in_dim=mech_global_embedding_in_dim,
         ).to(self.device)
         self.critic = SACCritic(
             action_dim,
@@ -628,7 +632,7 @@ class SACTrainer:
             node_feat_dim=8,
             store_global_feat=True,
             max_globals=12,
-            global_feat_dim=9,
+            global_feat_dim=mech_global_embedding_in_dim,
             device=self.device,
         )
         # voxels ids
@@ -902,6 +906,7 @@ def run_training(
     action_dim,
     electronics_graph_out_dim,
     mechanics_graph_out_dim,
+    mech_global_embedding_in_dim,
     num_steps=100000,
     prefill_steps=1000,
     buffer_size=10000,
@@ -926,6 +931,7 @@ def run_training(
         action_dim,
         electronics_graph_out_dim,
         mechanics_graph_out_dim,
+        mech_global_embedding_in_dim,
         buffer_size=buffer_size,
         singleton_buffer_size=singleton_buffer_size,
         batch_size=ml_batch_dim,
@@ -961,7 +967,10 @@ def run_training(
     )
 
     prefill_start_time = time.time()
-    camera = env.__dict__["concurrent_scenes_data"][0].scene.visualizer.cameras[0]
+    video_cams = []
+    for scene_data in env.concurrent_scenes_data:
+        video_cams.extend(scene_data.scene.visualizer.cameras)
+
     # camera.start_recording()
     action_bound_min = torch.tensor(command_cfg["min_bounds"])
     action_bound_max = torch.tensor(command_cfg["max_bounds"])
@@ -1090,6 +1099,17 @@ def run_training(
         if step % 1000 == 0:
             print(f"Step {step}: critic_loss={cl}, actor_loss={al}, alpha={alpha}")
 
+        # save the step information if necessary.
+        optional_save(
+            save_any=True,
+            save_video=True,
+            save_video_every_steps=1000,
+            video_len=50,
+            video_cams=video_cams,
+            current_step=step,
+            save_path="/workspace/data/obs/",
+        )
+
         # Update observations
         prev_video_obs = video_obs  # only prev_video_obs is stored
         action = action.to(trainer.device)
@@ -1102,12 +1122,13 @@ if __name__ == "__main__":
     # Initialize Genesis
     gs.init(
         backend=gs.cuda,
-        logging_level="debug",  # , logging_level="warning"
+        logging_level="warning",  # logging_level="debug",
     )  # note: logging level "warning" because genesis spams step speed logs during training.
 
     # Create task and environment setup
     tasks = [AssembleTask(), DisassembleTask()]
-    env_setups = [MoveBoxSetup(), TenHoles()]
+    env_setups = [TenHoles()]
+    assert len(env_setups) == 1, "Only one environment setup is supported for now."
     # TODO robot selection (franka/humanoid)
 
     debug = True  # True
@@ -1116,7 +1137,7 @@ if __name__ == "__main__":
 
     # Environment configuration
     env_cfg = {
-        "num_actions": 9,  # [x, y, z, quat_w, quat_x, quat_y, quat_z, gripper_force_left, gripper_force_right]
+        "num_actions": 10,  # [x, y, z, quat_w, quat_x, quat_y, quat_z, gripper_force_left, gripper_force_right, pick_up_tool]
         "joint_names": [
             "joint1",
             "joint2",
@@ -1171,13 +1192,15 @@ if __name__ == "__main__":
             # "electronic_graph": True,
             # "path": "./obs/",
             "video": False,  # not flooding the disk..
+            "new_video_every": 1000,
+            "video_len": 50,
             "voxel": False,
             "electronic_graph": False,
             "mechanics_graph": False,
             "path": "/workspace/data/obs/",
         },
         "force_recreate_data": force_recreate_data,
-        "env_setup_ids": list(range(2)),  # 2 scenes now.
+        "env_setup_ids": list(range(len(env_setups))),
     }
 
     command_cfg = {
@@ -1185,12 +1208,14 @@ if __name__ == "__main__":
             *(-0.8, -0.8, 0),  # XYZ position min
             *(-1.0, -1.0, -1.0, -1.0),  # Quaternion components (w,x,y,z) min
             *(0.0, 0.0),  # Gripper control min
+            0.0,  # tool control min (0.5 denotes pick up tool)
         ],
         "max_bounds": [
             *(0.8, 0.8, 1.0),  # XYZ position max
             # ^note: xyz is dep
             *(1.0, 1.0, 1.0, 1.0),
             *(1.0, 1.0),  # Quaternion components (w,x,y,z) max
+            1.0,  # tool control max (0.5 denotes pick up tool)
         ],
     }
 
@@ -1202,6 +1227,7 @@ if __name__ == "__main__":
         256,
         7,
     )  # 2 cameras, 7 channels (RGB, depth, segmentation)
+    mech_global_embedding_in_dim = 9
     electronics_graph_encoded_dim = 64  # latent dim from graph encoder
     mechanics_graph_encoded_dim = 128
     electronics_graph_feat = 4  # number of features in graph.x
@@ -1238,6 +1264,7 @@ if __name__ == "__main__":
         action_dim=action_dim,
         electronics_graph_out_dim=electronics_graph_encoded_dim,
         mechanics_graph_out_dim=mechanics_graph_encoded_dim,
+        mech_global_embedding_in_dim=mech_global_embedding_in_dim,
         buffer_size=buffer_size,
         singleton_buffer_size=singleton_buffer_size,
         prefill_steps=prefill_steps,
