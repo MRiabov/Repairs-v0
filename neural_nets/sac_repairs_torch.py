@@ -2,8 +2,8 @@ import copy
 import time
 import os
 
-os.environ["PYOPENGL_PLATFORM"] = "egl"
-os.environ["EGL_PLATFORM"] = "surfaceless"
+# os.environ["PYOPENGL_PLATFORM"] = "egl" # 7.11 disabled this... who knows.
+# os.environ["EGL_PLATFORM"] = "surfaceless"
 
 import tensordict
 import torch
@@ -24,8 +24,10 @@ from torchrl.data.replay_buffers import (
 )
 from torchsparse_util import sparse_coo_to_torchsparse
 
-from examples.box_to_pos_task import MoveBoxSetup
+# from examples.box_to_pos_task import MoveBoxSetup
 from examples.ten_holes_14 import TenHoles
+from examples.wire_up_15 import WireUp
+from examples.clamp_plates_49 import ClampPlates
 from repairs_components.save_and_load.online_save import optional_save
 
 
@@ -42,6 +44,7 @@ class SACActor(nn.Module):
         electronics_graph_out_dim,
         mechanics_graph_out_dim,
         mech_global_embedding_in_dim,
+        command_cfg: dict,
         device=None,
         dtype=torch.bfloat16,
     ):
@@ -49,6 +52,7 @@ class SACActor(nn.Module):
         self.device = device or torch.device(
             "cuda" if torch.cuda.is_available() else "cpu"
         )
+        self.command_cfg = command_cfg
 
         # --- Voxel encoding helpers for torchsparse ---
         @torch._dynamo.disable
@@ -246,7 +250,16 @@ class SACActor(nn.Module):
         log_prob = log_prob.sum(dim=-1, keepdim=True) - torch.log(
             1 - action.pow(2) + 1e-6
         ).sum(dim=-1, keepdim=True)
+        # rescale action to be in the range of command_cfg from [-1,1]
+        action = self._rescale_action(action)
         return action.to(torch.bfloat16), log_prob.to(torch.bfloat16)
+
+    def _rescale_action(self, action: torch.Tensor):
+        """Rescale action to be in the range of command_cfg from [-1,1]"""
+        low = self.command_cfg["min_bounds"]
+        high = self.command_cfg["max_bounds"]
+        # FIXME: no quat normalization even though should be.
+        return low + 0.5 * (action + 1.0) * (high - low)
 
 
 import torch
@@ -525,9 +538,12 @@ class SACTrainer:
     def __init__(
         self,
         action_dim,
-        electronics_graph_encoded_dim,
-        mechanics_graph_encoded_dim,
+        electronics_graph_in_dim,
+        mechanics_graph_in_dim,
         mech_global_embedding_in_dim,
+        mechanics_graph_encoded_dim,
+        electronics_graph_encoded_dim,
+        command_cfg: dict,
         device=None,
         gamma=0.99,
         tau=0.005,
@@ -545,17 +561,18 @@ class SACTrainer:
         )
         self.actor = SACActor(
             action_dim,
-            electronics_graph_in_dim=4,
+            electronics_graph_in_dim=electronics_graph_in_dim,
             electronics_graph_out_dim=electronics_graph_encoded_dim,
-            mechanics_graph_in_dim=8,
+            mechanics_graph_in_dim=mechanics_graph_in_dim,
             mechanics_graph_out_dim=mechanics_graph_encoded_dim,
             mech_global_embedding_in_dim=mech_global_embedding_in_dim,
+            command_cfg=command_cfg,
         ).to(self.device)
         self.critic = SACCritic(
             action_dim,
-            electronics_graph_in_dim=4,
+            electronics_graph_in_dim=electronics_graph_in_dim,
             electronics_graph_out_dim=electronics_graph_encoded_dim,
-            mechanics_graph_in_dim=8,
+            mechanics_graph_in_dim=mechanics_graph_in_dim,
             mechanics_graph_out_dim=mechanics_graph_encoded_dim,
         ).to(self.device)
         # Try to speed-up networks with torch.compile (PyTorch ≥ 2.0). If it
@@ -626,10 +643,12 @@ class SACTrainer:
             device=self.device,
         )
         self.elec_graph_buffer = GraphBuffer(
-            node_feat_dim=4, store_global_feat=False, device=self.device
+            node_feat_dim=electronics_graph_in_dim,
+            store_global_feat=False,
+            device=self.device,
         )
         self.mech_graph_buffer = GraphBuffer(
-            node_feat_dim=8,
+            node_feat_dim=mechanics_graph_in_dim,
             store_global_feat=True,
             max_globals=12,
             global_feat_dim=mech_global_embedding_in_dim,
@@ -655,30 +674,30 @@ class SACTrainer:
             batch_size, dtype=torch.int, device=self.device
         )
 
-    def select_action(
-        self,
-        voxel_init_obs,
-        voxel_des_obs,
-        video_obs,
-        elec_graph_init_obs,
-        elec_graph_des_obs,
-        mech_graph_init_obs,
-        mech_graph_des_obs,
-        deterministic=False,
-    ):
-        self.actor.eval()
-        with torch.no_grad():
-            action, _ = self.actor(
-                voxel_init_obs,
-                voxel_des_obs,
-                video_obs.to(self.device),
-                elec_graph_init_obs.to(self.device),
-                elec_graph_des_obs.to(self.device),
-                mech_graph_init_obs.to(self.device),
-                mech_graph_des_obs.to(self.device),
-            )
-        self.actor.train()
-        return action.cpu()
+    # def select_action(
+    #     self,
+    #     voxel_init_obs,
+    #     voxel_des_obs,
+    #     video_obs,
+    #     elec_graph_init_obs,
+    #     elec_graph_des_obs,
+    #     mech_graph_init_obs,
+    #     mech_graph_des_obs,
+    #     deterministic=False,
+    # ):
+    #     self.actor.eval()
+    #     with torch.no_grad():
+    #         action, _ = self.actor(
+    #             voxel_init_obs,
+    #             voxel_des_obs,
+    #             video_obs.to(self.device),
+    #             elec_graph_init_obs.to(self.device),
+    #             elec_graph_des_obs.to(self.device),
+    #             mech_graph_init_obs.to(self.device),
+    #             mech_graph_des_obs.to(self.device),
+    #         )
+    #     self.actor.train()
+    #     return action  # .cpu() # unnecessary.
 
     # @torch.compile()  # dynamic=true? but is it?
     def update(
@@ -904,8 +923,10 @@ def run_training(
     ml_batch_dim,
     sample_batch_size,
     action_dim,
-    electronics_graph_out_dim,
-    mechanics_graph_out_dim,
+    electronics_graph_in_dim,
+    mechanics_graph_in_dim,
+    electronics_graph_encoded_dim,
+    mechanics_graph_encoded_dim,
     mech_global_embedding_in_dim,
     num_steps=100000,
     prefill_steps=1000,
@@ -928,14 +949,17 @@ def run_training(
         io_cfg=io_cfg,
     )
     trainer = SACTrainer(
-        action_dim,
-        electronics_graph_out_dim,
-        mechanics_graph_out_dim,
-        mech_global_embedding_in_dim,
+        action_dim=action_dim,
+        electronics_graph_encoded_dim=electronics_graph_encoded_dim,
+        electronics_graph_in_dim=electronics_graph_in_dim,
+        mechanics_graph_encoded_dim=mechanics_graph_encoded_dim,
+        mechanics_graph_in_dim=mechanics_graph_in_dim,
+        mech_global_embedding_in_dim=mech_global_embedding_in_dim,
         buffer_size=buffer_size,
         singleton_buffer_size=singleton_buffer_size,
         batch_size=ml_batch_dim,
         sample_batch_size=sample_batch_size,
+        command_cfg=command_cfg,
     )
     # FIXME: I'm finding that voxel_init_obs is 2,256,256,256 when it should be 4,2,256,256,256
     (
@@ -971,19 +995,17 @@ def run_training(
     for scene_data in env.concurrent_scenes_data:
         video_cams.extend(scene_data.scene.visualizer.cameras)
 
-    # camera.start_recording()
+    video_cams[0].start_recording()
     action_bound_min = torch.tensor(command_cfg["min_bounds"])
     action_bound_max = torch.tensor(command_cfg["max_bounds"])
 
     # Prefill replay buffer with random actions
     for _ in range(prefill_steps):
         rand_action = (
-            torch.rand(
-                (ml_batch_dim, action_dim), device=trainer.device, dtype=torch.bfloat16
-            )
+            torch.rand((ml_batch_dim, action_dim), dtype=torch.bfloat16)
             * (action_bound_max - action_bound_min)
             + action_bound_min
-        )
+        ).to(trainer.device)
         # note: action should probably be rescaled to franka arm space.
         (
             voxel_init_obs,
@@ -1016,12 +1038,14 @@ def run_training(
     print(
         f"Buffer prefill steps ended. Elapsed time: {time.time() - prefill_start_time}"
     )
-    # camera.stop_recording(save_to_filename="video.mp4", fps=50)
+    video_cams[0].stop_recording(
+        save_to_filename="/workspace/data/debug_render/buffer_prefill.mp4", fps=50
+    )
 
     # Main training loop
     for step in range(num_steps):
         # Get action from policy
-        action = trainer.select_action(
+        action, log_prob = trainer.actor.sample_action(
             # don't convert globally because buffer stores voxel obs as coo.
             sparse_coo_to_torchsparse(voxel_init_obs),
             sparse_coo_to_torchsparse(voxel_des_obs),
@@ -1123,6 +1147,8 @@ if __name__ == "__main__":
     gs.init(
         backend=gs.cuda,
         logging_level="warning",  # logging_level="debug",
+        # performance_mode=True,
+        # debug=True,
     )  # note: logging level "warning" because genesis spams step speed logs during training.
 
     # Create task and environment setup
@@ -1135,6 +1161,7 @@ if __name__ == "__main__":
     force_recreate_data = False  # True
     # Note: set force_recreate_data to True after non-debug runs to remove large config files.
 
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     # Environment configuration
     env_cfg = {
         "num_actions": 10,  # [x, y, z, quat_w, quat_x, quat_y, quat_z, gripper_force_left, gripper_force_right, pick_up_tool]
@@ -1198,25 +1225,37 @@ if __name__ == "__main__":
             "electronic_graph": False,
             "mechanics_graph": False,
             "path": "/workspace/data/obs/",
+            "show_fps": True,
         },
         "force_recreate_data": force_recreate_data,
         "env_setup_ids": list(range(len(env_setups))),
+        "show_fps": True,
     }
 
     command_cfg = {
-        "min_bounds": [
-            *(-0.8, -0.8, 0),  # XYZ position min
-            *(-1.0, -1.0, -1.0, -1.0),  # Quaternion components (w,x,y,z) min
-            *(0.0, 0.0),  # Gripper control min
-            0.0,  # tool control min (0.5 denotes pick up tool)
-        ],
-        "max_bounds": [
-            *(0.8, 0.8, 1.0),  # XYZ position max
-            # ^note: xyz is dep
-            *(1.0, 1.0, 1.0, 1.0),
-            *(1.0, 1.0),  # Quaternion components (w,x,y,z) max
-            1.0,  # tool control max (0.5 denotes pick up tool)
-        ],
+        "min_bounds": torch.tensor(
+            [
+                *(-0.8, -0.8, 0),  # XYZ position min
+                *(-1.0, -1.0, -1.0, -1.0),  # Quaternion components (w,x,y,z) min
+                *(0.0, 0.0),  # Gripper control min
+                0.0,  # tool control min (0.25 denotes release tool)
+            ],
+            dtype=torch.float,
+            device=device,
+        ),
+        "max_bounds": torch.tensor(
+            [
+                *(0.8, 0.8, 1.0),  # XYZ position max
+                # ^note: xyz is dep
+                *(1.0, 1.0, 1.0, 1.0),  # Quaternion components (w,x,y,z) max
+                *(1.0, 1.0),  # Tool: ... possibly pick up/release fastener.
+                # I expect that #7 could be obsolete?
+                1.0,  # tool control max (0.75 denotes pick up tool)
+                # note: maybe - to release fastener, set tool control to 0.2-0.4. To release tool, 0.0-0.2
+            ],
+            dtype=torch.float,
+            device=device,
+        ),
     }
 
     action_dim = env_cfg["num_actions"]
@@ -1227,6 +1266,7 @@ if __name__ == "__main__":
         256,
         7,
     )  # 2 cameras, 7 channels (RGB, depth, segmentation)
+    mechanics_graph_feat = 8
     mech_global_embedding_in_dim = 9
     electronics_graph_encoded_dim = 64  # latent dim from graph encoder
     mechanics_graph_encoded_dim = 128
@@ -1248,7 +1288,10 @@ if __name__ == "__main__":
     singleton_buffer_size = (
         20 if debug else 10_000
     )  # was 200_000, reduced due to GPU constraints.
-    min_buffer_len = 40 if debug else 10_000
+    # min_buffer_len = 40 if debug else 10_000
+    min_buffer_len = (
+        120 if debug else 10_000
+    )  # NOTE: was 40. increased to 120 for env debug.
     prefill_steps = min_buffer_len // batch_size + 1
     # ^46gb at 2*256*256*7*int8 res!!! (w/o sparsity.)
     sample_batch_size = 256 if not debug else 4
@@ -1262,8 +1305,10 @@ if __name__ == "__main__":
         command_cfg=command_cfg,
         ml_batch_dim=batch_size,
         action_dim=action_dim,
-        electronics_graph_out_dim=electronics_graph_encoded_dim,
-        mechanics_graph_out_dim=mechanics_graph_encoded_dim,
+        electronics_graph_in_dim=electronics_graph_feat,
+        mechanics_graph_in_dim=mechanics_graph_feat,
+        electronics_graph_encoded_dim=electronics_graph_encoded_dim,
+        mechanics_graph_encoded_dim=mechanics_graph_encoded_dim,
         mech_global_embedding_in_dim=mech_global_embedding_in_dim,
         buffer_size=buffer_size,
         singleton_buffer_size=singleton_buffer_size,
