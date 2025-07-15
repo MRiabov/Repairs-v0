@@ -47,6 +47,7 @@ class GraphBuffer:
                 "max_globals must be specified if store_global_feat is True"
             )
             self.follow_batch = ["global_feat"]
+            self.global_feat_dim = global_feat_dim
         else:
             self.follow_batch = []
 
@@ -164,7 +165,7 @@ class GraphBuffer:
                 )
                 gf = g.global_feat
                 assert gf.size(0) <= self.max_globals, "Too many global features"
-                self._global_feat[row].zero_() # should be already 0?
+                self._global_feat[row].zero_()  # should be already 0?
                 self._global_feat[row, : gf.size(0)] = gf
                 self._num_globals[row] = gf.size(0)
 
@@ -202,12 +203,21 @@ class GraphBuffer:
         valid_ids = ids[valid_mask]  # (G,) where G <= B
         if valid_ids.numel() == 0:
             # Request only had padding → return *empty* Batch
-            return Batch(
+            batch = Batch(
                 num_graphs=ids.size(0),  # it will return ids.size(0) 0s in the encoder.
                 batch=torch.empty(0, dtype=torch.long),
                 x=torch.empty((0, self.node_feat_dim), dtype=torch.float),
                 edge_index=torch.empty((2, 0), dtype=torch.long),
+                ptr=torch.zeros(
+                    ids.size(0) + 1, dtype=torch.long
+                ),  # may well be unnecessary (LLM-suggested)
             )
+            if self.store_global_feat:
+                batch.global_feat = torch.empty(
+                    (0, self.global_feat_dim), dtype=torch.float
+                )
+                batch.global_feat_batch = torch.empty((0,), dtype=torch.long)
+            return batch
 
         # ------------------------------------------------------------------
         # Gather per-graph sizes (vectorised) -------------------------------
@@ -288,9 +298,9 @@ class GraphBuffer:
                 kwargs["global_feat_batch"] = global_feat_batch
             else:
                 kwargs["global_feat"] = torch.empty(
-                    (0, self.node_feat_dim),
+                    (0, self.global_feat_dim),
                     device=self.device,
-                    dtype=self._node_feat.dtype,
+                    dtype=self._global_feat.dtype,
                 )
                 kwargs["global_feat_batch"] = torch.empty(
                     (0,), device=self.device, dtype=torch.long

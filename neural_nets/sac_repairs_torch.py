@@ -865,11 +865,16 @@ class SACTrainer:
         # Clean up unused voxels
         self.voxel_buffer.cleanup(all_voxel_ids)
 
-        # Clean up unused electronics graphs
-        all_graph_ids = torch.cat(
+        # Clean up unused electronics graphs # I think the elec and mech graphs should be equal, always.
+        elec_graph_ids = torch.cat(
             [self.init_elec_graph_ids, self.des_elec_graph_ids]
         ).unique()
-        self.mech_graph_buffer.cleanup(all_graph_ids)
+        self.elec_graph_buffer.cleanup(elec_graph_ids)
+        # Clean up unused mechanical graphs
+        mech_graph_ids = torch.cat(
+            [self.init_mech_graph_ids, self.des_mech_graph_ids]
+        ).unique()
+        self.mech_graph_buffer.cleanup(mech_graph_ids)
 
     def get_batch_voxels(
         self, init_voxel_ids: torch.Tensor, des_voxel_ids: torch.Tensor
@@ -1011,10 +1016,10 @@ def run_training(
             voxel_init_obs,
             voxel_des_obs,
             video_obs,
-            elec_graph_init_obs,
-            elec_graph_des_obs,
             mech_graph_init_obs,
             mech_graph_des_obs,
+            elec_graph_init_obs,
+            elec_graph_des_obs,
             rewards,
             dones,
             info,
@@ -1050,10 +1055,10 @@ def run_training(
             sparse_coo_to_torchsparse(voxel_init_obs),
             sparse_coo_to_torchsparse(voxel_des_obs),
             video_obs,
-            elec_graph_init_obs.to(trainer.device),
-            elec_graph_des_obs.to(trainer.device),
-            mech_graph_init_obs.to(trainer.device),
-            mech_graph_des_obs.to(trainer.device),
+            elec_graph_init_obs=elec_graph_init_obs.to(trainer.device),
+            elec_graph_des_obs=elec_graph_des_obs.to(trainer.device),
+            mech_graph_init_obs=mech_graph_init_obs.to(trainer.device),
+            mech_graph_des_obs=mech_graph_des_obs.to(trainer.device),
         )
 
         # Step environment
@@ -1285,13 +1290,14 @@ if __name__ == "__main__":
     buffer_size = (
         100 if debug else 200_000
     )  # was 200_000, reduced due to GPU constraints.
-    singleton_buffer_size = (
-        20 if debug else 10_000
-    )  # was 200_000, reduced due to GPU constraints.
     # min_buffer_len = 40 if debug else 10_000
     min_buffer_len = (
         120 if debug else 10_000
     )  # NOTE: was 40. increased to 120 for env debug.
+    singleton_buffer_size = (
+        min_buffer_len // 4 + 1
+        # 20 if debug else 10_000
+    )  # was 200_000, reduced due to GPU constraints.
     prefill_steps = min_buffer_len // batch_size + 1
     # ^46gb at 2*256*256*7*int8 res!!! (w/o sparsity.)
     sample_batch_size = 256 if not debug else 4

@@ -213,10 +213,10 @@ class GraphEncoderWithGlobalFeatures(GraphEncoder):
     def forward(self, data: Batch, expected_batch_dim: int = -1):
         graph_emb = self.graph_encoder(data, expected_batch_dim)
         global_emb = self.global_feat_encoder(
-            # FIXME: data.batch is incorrect! data.batch is the batch of nodes, not the batch of graph-level features.
+            # dev note: use data.global_feat_batch instead of data.batch, as data.batch is the batch of nodes, not the batch of graph-level features.
             data.global_feat.to(self.dtype),
             data.global_feat_batch,  # note: created during Batch.from_data_list(follow_batch="global_feat")
-            batch_size=data.num_graphs,
+            batch_size=expected_batch_dim,
         )
         global_emb = torch.cat([graph_emb, global_emb], dim=1)
         global_emb = self.global_bn1(global_emb)
