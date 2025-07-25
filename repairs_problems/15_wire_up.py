@@ -39,7 +39,7 @@ class WireUp(EnvSetup):
             for i in range(4):
                 joint = RigidJoint(f"always_{i}", to_part=female_geoms[i])
                 joint.connect_to(other=elec_panel.joints[f"always_{i}"])
-                # note: if label name is "always", keep it evne despite perturbations.
+                # note: if label name is "always", keep it even despite perturbations.
 
             # FIXME: no way to define that a connector would be constrained to other body.
 

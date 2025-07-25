@@ -27,6 +27,7 @@ from torchsparse_util import sparse_coo_to_torchsparse
 from examples.box_to_pos_task import MoveBoxSetup
 from examples.ten_holes_14 import TenHoles
 
+
 class SACActor(nn.Module):
     """
     PyTorch implementation of SAC Actor network.

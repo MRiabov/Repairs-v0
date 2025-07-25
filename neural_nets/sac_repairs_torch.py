@@ -258,7 +258,9 @@ class SACActor(nn.Module):
         """Rescale action to be in the range of command_cfg from [-1,1]"""
         low = self.command_cfg["min_bounds"]
         high = self.command_cfg["max_bounds"]
-        # FIXME: no quat normalization even though should be.
+        # Normalize quaternion part of the action (indices 3:7)
+        action[..., 3:7] = F.normalize(action[..., 3:7], dim=-1, eps=1e-6)
+
         return low + 0.5 * (action + 1.0) * (high - low)
 
 
@@ -751,7 +753,8 @@ class SACTrainer:
         )
         cl = (F.mse_loss(q1, target) + F.mse_loss(q2, target)).to(torch.bfloat16)
         self.critic_optimizer.zero_grad()
-        cl.backward()
+        with torch.autograd.set_detect_anomaly(True):
+            cl.backward()
         self.critic_optimizer.step()
         a2, lp = self.actor.sample_action(
             vox_init,
@@ -1163,7 +1166,7 @@ if __name__ == "__main__":
     # TODO robot selection (franka/humanoid)
 
     debug = True  # True
-    force_recreate_data = False  # True
+    force_recreate_data = True  # True
     # Note: set force_recreate_data to True after non-debug runs to remove large config files.
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

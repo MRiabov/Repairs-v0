@@ -19,7 +19,7 @@ class TenHoles(EnvSetup):
                     holes, hole_locs = fastener_hole(radius=7, depth=10)
 
         fastener, collision_detection_position = Fastener(
-            False, initial_body_a="base_box@solid"
+            initial_body_a="base_box@solid"
         ).bd_geometry()
         fasteners = [fastener.moved(loc) for loc in grid_locs.locations]
 
@@ -28,4 +28,5 @@ class TenHoles(EnvSetup):
 
 if __name__ == "__main__":
     env = TenHoles()
+    env.validate()
     show(env.desired_state_geom())

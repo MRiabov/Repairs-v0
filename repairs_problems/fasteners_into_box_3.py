@@ -19,7 +19,7 @@ class FastenersIntoBox(EnvSetup):
                 with Locations((1, 1, 0)):
                     fastener_hole(2, 2)
 
-        fastener = Fastener(False, initial_body_a="box_with_holes@solid").bd_geometry()
+        fastener = Fastener(initial_body_a="box_with_holes@solid").bd_geometry()
 
         box_with_holes.part.label = "box@solid"
         return (Compound(children=[box_with_holes.part]),)
