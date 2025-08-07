@@ -1047,7 +1047,7 @@ def run_training(
         f"Buffer prefill steps ended. Elapsed time: {time.time() - prefill_start_time}"
     )
     video_cams[0].stop_recording(
-        save_to_filename="/workspace/data/debug_render/buffer_prefill.mp4", fps=50
+        save_to_filename=io_cfg["data_dir"] + "/debug_render/buffer_prefill.mp4", fps=50
     )
 
     # Main training loop
@@ -1151,9 +1151,11 @@ if __name__ == "__main__":
     # Example setup for training
     from repairs_components.processing.tasks import AssembleTask, DisassembleTask
 
+    cuda_available = torch.cuda.is_available()
+
     # Initialize Genesis
     gs.init(
-        backend=gs.cuda,
+        backend=gs.cuda if cuda_available else gs.cpu,
         logging_level="warning",  # logging_level="debug",
         # performance_mode=True,
         # debug=True,
@@ -1169,7 +1171,7 @@ if __name__ == "__main__":
     force_recreate_data = True  # True
     # Note: set force_recreate_data to True after non-debug runs to remove large config files.
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda" if cuda_available else "cpu")
     # Environment configuration
     env_cfg = {
         "num_actions": 10,  # [x, y, z, quat_w, quat_x, quat_y, quat_z, gripper_force_left, gripper_force_right, pick_up_tool]
@@ -1220,7 +1222,8 @@ if __name__ == "__main__":
             if not debug
             else 4  # 256 environments per scene.
         },  # note^ 4 is for faster env spinup.
-        "data_dir": "/workspace/data",
+        # "data_dir": "/workspace/data",
+        "data_dir": "/home/maksym/Work/repairs-data",
         "save_obs": {
             # "video": True,
             # "voxel": True,
@@ -1232,7 +1235,7 @@ if __name__ == "__main__":
             "voxel": False,
             "electronic_graph": False,
             "mechanics_graph": False,
-            "path": "/workspace/data/obs/",
+            "path": "/home/maksym/Work/repairs-data/obs/",
             "show_fps": True,
         },
         "force_recreate_data": force_recreate_data,
@@ -1287,7 +1290,7 @@ if __name__ == "__main__":
         else 4  # 16 if jax.default_backend() == "cpu" else 64  # 256 # note:debug atm.
     )
     train_steps = (
-        10_000_000 if torch.cuda.is_available() and not debug else 3000
+        10_000_000 if cuda_available and not debug else 3000
     ) // batch_size
     # train_steps = (10_000_000 if jax.default_backend() == "gpu" else 3000) // batch_size
     buffer_size = (
