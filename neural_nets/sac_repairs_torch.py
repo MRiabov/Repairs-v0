@@ -73,7 +73,8 @@ class SACActor(nn.Module):
         # Voxel encoder (3D conv layers)
         self.voxel_conv1 = tsnn.Conv3d(1, 2, kernel_size=(6, 6, 6), stride=(4, 4, 4))
         self.voxel_bn1 = tsnn.BatchNorm(2)
-        self.voxel_act = tsnn.SiLU()
+        self.voxel_act = tsnn.ReLU()
+        # self.voxel_act = tsnn.SiLU() #note: currently have torchsparse 2.0.0, which has no SiLU.
         self.voxel_conv2 = tsnn.Conv3d(2, 4, kernel_size=(6, 6, 6), stride=(4, 4, 4))
         self.voxel_bn2 = tsnn.BatchNorm(4)
         self.voxel_conv3 = tsnn.Conv3d(4, 8, kernel_size=(6, 6, 6), stride=(4, 4, 4))
@@ -311,13 +312,13 @@ class SACCritic(nn.Module):
         # Shared conv encoders for Q1
         self.conv3d_q1 = nn.Sequential(
             tsnn.Conv3d(1, 2, kernel_size=(6, 6, 6), stride=(4, 4, 4)),
-            tsnn.SiLU(),
+            tsnn.ReLU(),
             tsnn.BatchNorm(2),
             tsnn.Conv3d(2, 4, kernel_size=(6, 6, 6), stride=(4, 4, 4)),
-            tsnn.SiLU(),
+            tsnn.ReLU(),
             tsnn.BatchNorm(4),
             tsnn.Conv3d(4, 8, kernel_size=(6, 6, 6), stride=(4, 4, 4)),
-            tsnn.SiLU(),
+            tsnn.ReLU(),
             tsnn.BatchNorm(8),
         )  # note: they are float16 by default. Could set to tf32 for better performance. bfloat16 is not supported.
         # Given input shape (D0, H0, W0) = (256, 256, 256) and 3 Conv3d layers each with kernel_size=6, stride=4:
@@ -329,10 +330,10 @@ class SACCritic(nn.Module):
         self.vid1_q1 = nn.Sequential(
             nn.Conv2d(7, 10, kernel_size=(6, 6), stride=(4, 4), dtype=torch.bfloat16),
             nn.BatchNorm2d(10, dtype=torch.bfloat16),
-            nn.SiLU(),
+            nn.ReLU(),
             nn.Conv2d(10, 12, kernel_size=(6, 6), stride=(3, 3), dtype=torch.bfloat16),
             nn.BatchNorm2d(12, dtype=torch.bfloat16),
-            nn.SiLU(),
+            nn.ReLU(),
             nn.Conv2d(12, 14, kernel_size=(6, 6), stride=(3, 3), dtype=torch.bfloat16),
             nn.BatchNorm2d(14, dtype=torch.bfloat16),
             nn.SiLU(),
@@ -392,14 +393,14 @@ class SACCritic(nn.Module):
         self.conv3d_q2 = nn.Sequential(
             tsnn.Conv3d(1, 2, kernel_size=(6, 6, 6), stride=(4, 4, 4)),
             tsnn.BatchNorm(2),
-            tsnn.SiLU(),
+            tsnn.ReLU(),
             tsnn.Conv3d(2, 4, kernel_size=(6, 6, 6), stride=(4, 4, 4)),
             tsnn.BatchNorm(4),
-            tsnn.SiLU(),
+            tsnn.ReLU(),
             tsnn.Conv3d(4, 8, kernel_size=(6, 6, 6), stride=(4, 4, 4)),
             tsnn.BatchNorm(8),
-            tsnn.SiLU(),
-        )
+            tsnn.ReLU(),
+        )  # TODO: restore SiLU on all conv3d
         self.vid1_q2 = nn.Sequential(  # 7 channels!
             nn.Conv2d(7, 10, kernel_size=(6, 6), stride=(4, 4), dtype=torch.bfloat16),
             nn.BatchNorm2d(10, dtype=torch.bfloat16),
@@ -1241,6 +1242,7 @@ if __name__ == "__main__":
         "force_recreate_data": force_recreate_data,
         "env_setup_ids": list(range(len(env_setups))),
         "show_fps": True,
+        "show_viewer": True,
     }
 
     command_cfg = {
@@ -1289,9 +1291,7 @@ if __name__ == "__main__":
         if not debug
         else 4  # 16 if jax.default_backend() == "cpu" else 64  # 256 # note:debug atm.
     )
-    train_steps = (
-        10_000_000 if cuda_available and not debug else 3000
-    ) // batch_size
+    train_steps = (10_000_000 if cuda_available and not debug else 3000) // batch_size
     # train_steps = (10_000_000 if jax.default_backend() == "gpu" else 3000) // batch_size
     buffer_size = (
         100 if debug else 200_000
